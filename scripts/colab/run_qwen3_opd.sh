@@ -143,6 +143,35 @@ echo "save     : every $SAVE_FREQ steps, keep last $MAX_ACTOR_CKPT_TO_KEEP"
 echo "eval     : $BENCHMARKS | n=$EVAL_N | max_tokens=$EVAL_MAX_TOKENS"
 echo "====================================="
 
+# Ensure the DAPO dedup file exists. The raw HF parquet contains the same
+# prompt 100 times (1,791,700 rows); prepare_grpo_data.py prefers the dedup
+# file but silently falls back to raw if it is missing.
+DAPO_DIR="${DATA_DIR}/DAPO-Math-17k/data"
+DEDUP_FILE="${DAPO_DIR}/dapo-math-17k-dedup.parquet"
+RAW_FILE="${DAPO_DIR}/dapo-math-17k.parquet"
+if [ ! -f "$DEDUP_FILE" ] && [ -f "$RAW_FILE" ]; then
+    echo
+    echo ">>> Creating DAPO dedup file (raw = 100 concatenated copies)"
+    "$PYTHON" - "$RAW_FILE" "$DEDUP_FILE" <<'PY'
+import sys
+
+import pyarrow.parquet as pq
+
+raw_path, out_path = sys.argv[1], sys.argv[2]
+df = pq.read_table(raw_path).to_pandas()
+print("raw rows  :", len(df))
+df["_prompt_key"] = df["prompt"].astype(str)
+df = (
+    df.drop_duplicates(subset=["_prompt_key"])
+    .drop(columns=["_prompt_key"])
+    .reset_index(drop=True)
+)
+print("dedup rows:", len(df))
+df.to_parquet(out_path)
+print("wrote", out_path)
+PY
+fi
+
 # Ensure the benchmark parquet files needed by eval exist.
 MISSING=0
 for b in $BENCHMARKS; do
