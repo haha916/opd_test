@@ -1,0 +1,263 @@
+#!/bin/bash
+# Colab end-to-end run: sampled-token OPD (80 steps) + checkpoint evaluation.
+#
+# Default configuration (Colab L4 24GB):
+#   student : /content/models/Qwen3-0.6B
+#   teacher : /content/models/Qwen3-4B-Instruct-2507
+#   80 optimizer steps, batch 8 (640 DAPO prompts)
+#   save every 10 steps; the ring buffer keeps only the last 5 -> steps 40,50,60,70,80
+#   after training: evaluate step_000 (base) + every kept checkpoint
+#
+# Usage:
+#   bash scripts/colab/run_qwen3_opd.sh
+#   SKIP_TRAIN=1 bash scripts/colab/run_qwen3_opd.sh          # eval only
+#   SKIP_EVAL=1  bash scripts/colab/run_qwen3_opd.sh          # train only
+#   TRAIN_BATCH_SIZE=16 PPO_MINI_BATCH_SIZE=16 bash scripts/colab/run_qwen3_opd.sh  # A100
+#   BENCHMARKS="math500 aime24 aime25 amc23" bash scripts/colab/run_qwen3_opd.sh
+#
+# Logs: /content/outputs/logs/colab_qwen3_opd_*.log
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+SRC_ROOT="${REPO_ROOT}/src"
+
+# ---------------------------------------------------------------------------
+# Python / paths
+# ---------------------------------------------------------------------------
+PYTHON=${PYTHON:-/content/verl_env/bin/python}
+if [ ! -x "$PYTHON" ]; then
+    echo "ERROR: $PYTHON not found. Run section 2 of the notebook first"
+    echo "       (uv venv --seed /content/verl_env --python 3.12)."
+    exit 1
+fi
+export PATH="$(dirname "$PYTHON"):$PATH"
+export VIRTUAL_ENV="$(dirname "$(dirname "$PYTHON")")"
+export PYTHONPATH="${SRC_ROOT}:${PYTHONPATH:-}"
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export TOKENIZERS_PARALLELISM=false
+
+MODEL_PATH=${MODEL_PATH:-/content/models/Qwen3-0.6B}
+TEACHER_MODEL_PATH=${TEACHER_MODEL_PATH:-/content/models/Qwen3-4B-Instruct-2507}
+DATA_DIR=${DATA_DIR:-/content/data}
+OUTPUT_ROOT=${OUTPUT_ROOT:-/content/outputs}
+PROCESSED="${DATA_DIR}/grpo_processed"
+
+for f in "$MODEL_PATH/config.json" "$TEACHER_MODEL_PATH/config.json"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR: missing model file $f"
+        echo "       run: bash scripts/utils/download_qwen3_models.sh"
+        exit 1
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Training configuration
+# ---------------------------------------------------------------------------
+RUN_ID=${RUN_ID:-colab80}
+LEARNING_RATE=${LEARNING_RATE:-1e-6}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
+TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-80}
+OPD_TRAIN_SIZE=${OPD_TRAIN_SIZE:-$((TRAIN_BATCH_SIZE * TOTAL_TRAINING_STEPS))}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-$TRAIN_BATCH_SIZE}
+PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
+
+# Save every 10 steps, keep the last 5. Steps 10/20/30 are written and then
+# deleted by the ring buffer, so the final kept set is 40/50/60/70/80.
+SAVE_FREQ=${SAVE_FREQ:-10}
+MAX_ACTOR_CKPT_TO_KEEP=${MAX_ACTOR_CKPT_TO_KEEP:-5}
+
+# No plateau selection: train all 80 steps. test_freq=-1 disables periodic
+# validation; verl still validates once at the last step, so val_n stays small.
+PLATEAU_ENABLE=${PLATEAU_ENABLE:-False}
+TEST_FREQ=${TEST_FREQ:--1}
+VAL_N=${VAL_N:-2}
+
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-4096}
+TRAIN_RESPONSE_LENGTH=${TRAIN_RESPONSE_LENGTH:-2048}
+EVAL_RESPONSE_LENGTH=${EVAL_RESPONSE_LENGTH:-4096}
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.35}
+FREEZE_LM_HEAD=${FREEZE_LM_HEAD:-False}
+ENABLE_THINKING=${ENABLE_THINKING:-False}
+
+if "$PYTHON" -c "import flash_attn" >/dev/null 2>&1; then
+    USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-True}
+    ATTN_IMPL=${ATTN_IMPL:-}
+    echo "[env] flash_attn found -> flash_attention_2 + remove_padding"
+else
+    USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-False}
+    ATTN_IMPL=${ATTN_IMPL:-sdpa}
+    echo "[env] flash_attn not found -> SDPA + padding"
+fi
+
+# ---------------------------------------------------------------------------
+# Evaluation configuration
+# ---------------------------------------------------------------------------
+BENCHMARKS=${BENCHMARKS:-"aime24 aime25 amc23"}
+EVAL_N=${EVAL_N:-4}
+EVAL_MAX_TOKENS=${EVAL_MAX_TOKENS:-4096}
+EVAL_MAX_MODEL_LEN=${EVAL_MAX_MODEL_LEN:-6144}
+EVAL_GPU_MEM_UTIL=${EVAL_GPU_MEM_UTIL:-0.85}
+EVAL_MAX_NUM_SEQS=${EVAL_MAX_NUM_SEQS:-64}
+LIMIT_PROMPTS=${LIMIT_PROMPTS:-0}
+EVAL_BASE=${EVAL_BASE:-1}
+
+LOG_DIR="${OUTPUT_ROOT}/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="${LOG_DIR}/colab_qwen3_opd_$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "=== Colab Qwen3 sampled-token OPD ==="
+date
+echo "log      : $LOG_FILE"
+echo "student  : $MODEL_PATH"
+echo "teacher  : $TEACHER_MODEL_PATH"
+echo "data     : $DATA_DIR"
+echo "steps    : $TOTAL_TRAINING_STEPS (batch $TRAIN_BATCH_SIZE, opd_size $OPD_TRAIN_SIZE)"
+echo "save     : every $SAVE_FREQ steps, keep last $MAX_ACTOR_CKPT_TO_KEEP"
+echo "eval     : $BENCHMARKS | n=$EVAL_N | max_tokens=$EVAL_MAX_TOKENS"
+echo "====================================="
+
+# Ensure the benchmark parquet files needed by eval exist.
+MISSING=0
+for b in $BENCHMARKS; do
+    [ -f "${PROCESSED}/val_${b}.parquet" ] || MISSING=1
+done
+if [ "$MISSING" = "1" ]; then
+    echo
+    echo ">>> Preparing eval benchmark data"
+    "$PYTHON" "${SRC_ROOT}/data/prepare_grpo_data.py" \
+        --data-dir "$DATA_DIR" \
+        --output-dir "$PROCESSED" \
+        --train-ratio 1.0 \
+        --benchmarks math500 aime24 aime25 amc23
+fi
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+RUN_DIR=""
+if [ "${SKIP_TRAIN:-0}" != "1" ]; then
+    echo
+    echo ">>> Training"
+    "$(dirname "$PYTHON")/ray" stop >/dev/null 2>&1 || true
+
+    MODEL_PATH="$MODEL_PATH" \
+    TEACHER_MODEL_PATH="$TEACHER_MODEL_PATH" \
+    DATA_DIR="$DATA_DIR" \
+    OUTPUT_ROOT="$OUTPUT_ROOT" \
+    ENABLE_THINKING="$ENABLE_THINKING" \
+    TRAIN_BATCH_SIZE="$TRAIN_BATCH_SIZE" \
+    TOTAL_TRAINING_STEPS="$TOTAL_TRAINING_STEPS" \
+    OPD_TRAIN_SIZE="$OPD_TRAIN_SIZE" \
+    PPO_MINI_BATCH_SIZE="$PPO_MINI_BATCH_SIZE" \
+    PPO_MICRO_BATCH_SIZE_PER_GPU="$PPO_MICRO_BATCH_SIZE_PER_GPU" \
+    LEARNING_RATE="$LEARNING_RATE" \
+    MAX_PROMPT_LENGTH="$MAX_PROMPT_LENGTH" \
+    MAX_RESPONSE_LENGTH="$MAX_RESPONSE_LENGTH" \
+    TRAIN_RESPONSE_LENGTH="$TRAIN_RESPONSE_LENGTH" \
+    EVAL_RESPONSE_LENGTH="$EVAL_RESPONSE_LENGTH" \
+    GPU_MEM_UTIL="$GPU_MEM_UTIL" \
+    USE_REMOVE_PADDING="$USE_REMOVE_PADDING" \
+    ATTN_IMPL="$ATTN_IMPL" \
+    FREEZE_LM_HEAD="$FREEZE_LM_HEAD" \
+    PLATEAU_ENABLE="$PLATEAU_ENABLE" \
+    TEST_FREQ="$TEST_FREQ" \
+    VAL_N="$VAL_N" \
+    SAVE_FREQ="$SAVE_FREQ" \
+    MAX_ACTOR_CKPT_TO_KEEP="$MAX_ACTOR_CKPT_TO_KEEP" \
+    RUN_ID="$RUN_ID" \
+    bash "${REPO_ROOT}/scripts/opd/train_opd_sample.sh"
+
+    echo
+    echo ">>> Training finished"
+fi
+
+# Locate the run directory (RUN_ID makes it unique).
+RUN_DIR=$(find "$OUTPUT_ROOT" -maxdepth 1 -type d -name "*-${RUN_ID}-OPD-*" \
+    -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+if [ -z "${RUN_DIR:-}" ]; then
+    echo "ERROR: could not find an output directory matching *-${RUN_ID}-OPD-*"
+    exit 1
+fi
+echo "run dir  : $RUN_DIR"
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+if [ "${SKIP_EVAL:-0}" = "1" ]; then
+    echo ">>> SKIP_EVAL=1, done"
+    exit 0
+fi
+
+echo
+echo ">>> Evaluation"
+"$(dirname "$PYTHON")/ray" stop >/dev/null 2>&1 || true
+sleep 5
+
+EVAL_ROOT=${EVAL_ROOT:-"${OUTPUT_ROOT}/eval/${RUN_ID}"}
+mkdir -p "$EVAL_ROOT"
+
+THINK_FLAG="--no-enable-thinking"
+if [ "$ENABLE_THINKING" = "True" ]; then
+    THINK_FLAG="--enable-thinking"
+fi
+
+eval_one() {
+    local tag="$1" model_path="$2"
+    local out_dir="${EVAL_ROOT}/${tag}"
+    if [ -f "${out_dir}/all_summary.json" ]; then
+        echo "[skip] ${tag}: already evaluated"
+        return 0
+    fi
+    if [ ! -f "${model_path}/config.json" ]; then
+        echo "[error] ${tag}: missing config.json at ${model_path}"
+        return 1
+    fi
+    echo "[eval] ${tag}: ${model_path}"
+    "$PYTHON" -I "${REPO_ROOT}/scripts/eval/eval_ckpt_bench.py" \
+        --model-path "$model_path" \
+        --tokenizer-path "$MODEL_PATH" \
+        --tag "$tag" \
+        --benchmarks $BENCHMARKS \
+        --data-dir "$PROCESSED" \
+        --out-dir "$out_dir" \
+        --n "$EVAL_N" \
+        --max-tokens "$EVAL_MAX_TOKENS" \
+        --temperature 0.6 \
+        --top-p 0.95 \
+        --max-model-len "$EVAL_MAX_MODEL_LEN" \
+        --max-num-seqs "$EVAL_MAX_NUM_SEQS" \
+        --gpu-memory-utilization "$EVAL_GPU_MEM_UTIL" \
+        --limit-prompts "$LIMIT_PROMPTS" \
+        "$THINK_FLAG"
+}
+
+FAILED=0
+if [ "$EVAL_BASE" = "1" ]; then
+    eval_one step_000 "$MODEL_PATH" || FAILED=$((FAILED + 1))
+fi
+
+for ckpt in "${RUN_DIR}"/global_step_*/actor/huggingface; do
+    [ -f "${ckpt}/config.json" ] || continue
+    step_dir="$(dirname "$(dirname "$ckpt")")"
+    step="$(basename "$step_dir")"
+    num="${step#global_step_}"
+    tag="$(printf 'step_%03d' "$num")"
+    eval_one "$tag" "$ckpt" || FAILED=$((FAILED + 1))
+done
+
+echo
+echo "[collect] failures: $FAILED"
+"$PYTHON" -I "${REPO_ROOT}/scripts/eval/collect_eval_curve.py" \
+    --root "$EVAL_ROOT" --benchmarks $BENCHMARKS || true
+"$PYTHON" -I "${REPO_ROOT}/scripts/eval/analyze_eval_curve.py" \
+    --root "$EVAL_ROOT" --delta 2.0 --min-points 2 || true
+
+echo
+echo "=== finished ==="
+date
+echo "run dir  : $RUN_DIR"
+echo "eval dir : $EVAL_ROOT"
+exit "$FAILED"
