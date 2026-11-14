@@ -4,7 +4,10 @@
 # Default configuration (Colab L4 24GB / A100 40-80GB, GPU auto-detected):
 #   student : /content/models/Qwen3-0.6B
 #   teacher : /content/models/Qwen3-4B-Instruct-2507
-#   80 optimizer steps; batch 16 on A100 (1280 prompts), batch 8 on L4 (640 prompts)
+#   80 optimizer steps:
+#     A100 80GB -> batch 64 (5120 prompts, the repo default scale)
+#     A100 40GB -> batch 16 (1280 prompts)
+#     L4 24GB   -> batch 8  (640 prompts)
 #   save every 10 steps; the ring buffer keeps only the last 5 -> steps 40,50,60,70,80
 #   after training: evaluate step_000 (base) + every kept checkpoint
 #
@@ -12,8 +15,7 @@
 #   bash scripts/colab/run_qwen3_opd.sh
 #   SKIP_TRAIN=1 bash scripts/colab/run_qwen3_opd.sh          # eval only
 #   SKIP_EVAL=1  bash scripts/colab/run_qwen3_opd.sh          # train only
-#   TRAIN_BATCH_SIZE=32 PPO_MINI_BATCH_SIZE=32 bash scripts/colab/run_qwen3_opd.sh  # A100 80GB, larger run
-#   TRAIN_BATCH_SIZE=64 PPO_MINI_BATCH_SIZE=64 bash scripts/colab/run_qwen3_opd.sh  # repo default scale (5120 prompts)
+#   TRAIN_BATCH_SIZE=16 PPO_MINI_BATCH_SIZE=16 bash scripts/colab/run_qwen3_opd.sh  # smaller run
 #   BENCHMARKS="math500 aime24 aime25 amc23" bash scripts/colab/run_qwen3_opd.sh
 #
 # Logs: /content/outputs/logs/colab_qwen3_opd_*.log
@@ -59,10 +61,17 @@ RUN_ID=${RUN_ID:-colab80}
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-80}
 
-# GPU-aware defaults: 16 x 80 = 1280 prompts on an A100 (40/80GB), 8 x 80 = 640 on L4.
+# GPU-aware defaults:
+#   80GB A100 -> 64 x 80 = 5120 prompts (repo default), micro-batch 4
+#   40GB A100 -> 16 x 80 = 1280 prompts, micro-batch 2
+#   24GB L4   ->  8 x 80 =  640 prompts, micro-batch 1
 VRAM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || true)
 VRAM_GB=$(( ${VRAM_MIB:-0} / 1024 ))
-if [ "$VRAM_GB" -ge 40 ]; then
+if [ "$VRAM_GB" -ge 70 ]; then
+    DEFAULT_TRAIN_BATCH_SIZE=64
+    DEFAULT_MICRO_BATCH=4
+    DEFAULT_GPU_MEM_UTIL=0.5
+elif [ "$VRAM_GB" -ge 40 ]; then
     DEFAULT_TRAIN_BATCH_SIZE=16
     DEFAULT_MICRO_BATCH=2
     DEFAULT_GPU_MEM_UTIL=0.5
