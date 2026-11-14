@@ -1,10 +1,10 @@
 #!/bin/bash
 # Colab end-to-end run: sampled-token OPD (80 steps) + checkpoint evaluation.
 #
-# Default configuration (Colab L4 24GB):
+# Default configuration (Colab L4 24GB / A100 40-80GB, GPU auto-detected):
 #   student : /content/models/Qwen3-0.6B
 #   teacher : /content/models/Qwen3-4B-Instruct-2507
-#   80 optimizer steps, batch 8 (640 DAPO prompts)
+#   80 optimizer steps; batch 16 on A100 (1280 prompts), batch 8 on L4 (640 prompts)
 #   save every 10 steps; the ring buffer keeps only the last 5 -> steps 40,50,60,70,80
 #   after training: evaluate step_000 (base) + every kept checkpoint
 #
@@ -12,7 +12,8 @@
 #   bash scripts/colab/run_qwen3_opd.sh
 #   SKIP_TRAIN=1 bash scripts/colab/run_qwen3_opd.sh          # eval only
 #   SKIP_EVAL=1  bash scripts/colab/run_qwen3_opd.sh          # train only
-#   TRAIN_BATCH_SIZE=16 PPO_MINI_BATCH_SIZE=16 bash scripts/colab/run_qwen3_opd.sh  # A100
+#   TRAIN_BATCH_SIZE=32 PPO_MINI_BATCH_SIZE=32 bash scripts/colab/run_qwen3_opd.sh  # A100 80GB, larger run
+#   TRAIN_BATCH_SIZE=64 PPO_MINI_BATCH_SIZE=64 bash scripts/colab/run_qwen3_opd.sh  # repo default scale (5120 prompts)
 #   BENCHMARKS="math500 aime24 aime25 amc23" bash scripts/colab/run_qwen3_opd.sh
 #
 # Logs: /content/outputs/logs/colab_qwen3_opd_*.log
@@ -56,11 +57,24 @@ done
 # ---------------------------------------------------------------------------
 RUN_ID=${RUN_ID:-colab80}
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-80}
+
+# GPU-aware defaults: 16 x 80 = 1280 prompts on an A100 (40/80GB), 8 x 80 = 640 on L4.
+VRAM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || true)
+VRAM_GB=$(( ${VRAM_MIB:-0} / 1024 ))
+if [ "$VRAM_GB" -ge 40 ]; then
+    DEFAULT_TRAIN_BATCH_SIZE=16
+    DEFAULT_MICRO_BATCH=2
+    DEFAULT_GPU_MEM_UTIL=0.5
+else
+    DEFAULT_TRAIN_BATCH_SIZE=8
+    DEFAULT_MICRO_BATCH=1
+    DEFAULT_GPU_MEM_UTIL=0.35
+fi
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-$DEFAULT_TRAIN_BATCH_SIZE}
 OPD_TRAIN_SIZE=${OPD_TRAIN_SIZE:-$((TRAIN_BATCH_SIZE * TOTAL_TRAINING_STEPS))}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-$TRAIN_BATCH_SIZE}
-PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
+PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-$DEFAULT_MICRO_BATCH}
 
 # Save every 10 steps, keep the last 5. Steps 10/20/30 are written and then
 # deleted by the ring buffer, so the final kept set is 40/50/60/70/80.
@@ -77,7 +91,7 @@ MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-4096}
 TRAIN_RESPONSE_LENGTH=${TRAIN_RESPONSE_LENGTH:-2048}
 EVAL_RESPONSE_LENGTH=${EVAL_RESPONSE_LENGTH:-4096}
-GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.35}
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-$DEFAULT_GPU_MEM_UTIL}
 FREEZE_LM_HEAD=${FREEZE_LM_HEAD:-False}
 ENABLE_THINKING=${ENABLE_THINKING:-False}
 
@@ -114,6 +128,7 @@ echo "log      : $LOG_FILE"
 echo "student  : $MODEL_PATH"
 echo "teacher  : $TEACHER_MODEL_PATH"
 echo "data     : $DATA_DIR"
+echo "gpu      : ${VRAM_GB}GB | micro_batch=$PPO_MICRO_BATCH_SIZE_PER_GPU | vllm_mem=$GPU_MEM_UTIL"
 echo "steps    : $TOTAL_TRAINING_STEPS (batch $TRAIN_BATCH_SIZE, opd_size $OPD_TRAIN_SIZE)"
 echo "save     : every $SAVE_FREQ steps, keep last $MAX_ACTOR_CKPT_TO_KEEP"
 echo "eval     : $BENCHMARKS | n=$EVAL_N | max_tokens=$EVAL_MAX_TOKENS"
