@@ -1,0 +1,13 @@
+# Runtime outputs / datasets / model weights (repo root only)
+/outputs/
+/models/
+/data/
+/wheels/
+
+# Python / notebook caches
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
