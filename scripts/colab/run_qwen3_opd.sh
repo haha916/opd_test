@@ -70,7 +70,7 @@ VRAM_GB=$(( ${VRAM_MIB:-0} / 1024 ))
 if [ "$VRAM_GB" -ge 70 ]; then
     DEFAULT_TRAIN_BATCH_SIZE=64
     DEFAULT_MICRO_BATCH=4
-    DEFAULT_GPU_MEM_UTIL=0.5
+    DEFAULT_GPU_MEM_UTIL=0.6
 elif [ "$VRAM_GB" -ge 40 ]; then
     DEFAULT_TRAIN_BATCH_SIZE=16
     DEFAULT_MICRO_BATCH=2
@@ -96,10 +96,10 @@ PLATEAU_ENABLE=${PLATEAU_ENABLE:-False}
 TEST_FREQ=${TEST_FREQ:--1}
 VAL_N=${VAL_N:-2}
 
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-4096}
-TRAIN_RESPONSE_LENGTH=${TRAIN_RESPONSE_LENGTH:-2048}
-EVAL_RESPONSE_LENGTH=${EVAL_RESPONSE_LENGTH:-4096}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-2048}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16382}
+TRAIN_RESPONSE_LENGTH=${TRAIN_RESPONSE_LENGTH:-8192}
+EVAL_RESPONSE_LENGTH=${EVAL_RESPONSE_LENGTH:-16382}
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-$DEFAULT_GPU_MEM_UTIL}
 FREEZE_LM_HEAD=${FREEZE_LM_HEAD:-False}
 ENABLE_THINKING=${ENABLE_THINKING:-False}
@@ -119,10 +119,16 @@ fi
 # ---------------------------------------------------------------------------
 BENCHMARKS=${BENCHMARKS:-"aime24 aime25 amc23"}
 EVAL_N=${EVAL_N:-4}
-EVAL_MAX_TOKENS=${EVAL_MAX_TOKENS:-4096}
-EVAL_MAX_MODEL_LEN=${EVAL_MAX_MODEL_LEN:-6144}
+EVAL_MAX_TOKENS=${EVAL_MAX_TOKENS:-32768}
+EVAL_MAX_MODEL_LEN=${EVAL_MAX_MODEL_LEN:-34000}
 EVAL_GPU_MEM_UTIL=${EVAL_GPU_MEM_UTIL:-0.85}
-EVAL_MAX_NUM_SEQS=${EVAL_MAX_NUM_SEQS:-64}
+EVAL_MAX_NUM_SEQS=${EVAL_MAX_NUM_SEQS:-12}
+# Qwen3 non-thinking recommendation (same as repo scripts/eval/eval_math.sh):
+# temperature 0.7 / top_p 0.8 / top_k 20. The legacy OPD checkpoint curves
+# used 0.6 / 0.95 / -1; set those explicitly to compare with the old curve.
+EVAL_TEMPERATURE=${EVAL_TEMPERATURE:-0.7}
+EVAL_TOP_P=${EVAL_TOP_P:-0.8}
+EVAL_TOP_K=${EVAL_TOP_K:-20}
 LIMIT_PROMPTS=${LIMIT_PROMPTS:-0}
 EVAL_BASE=${EVAL_BASE:-1}
 
@@ -140,7 +146,7 @@ echo "data     : $DATA_DIR"
 echo "gpu      : ${VRAM_GB}GB | micro_batch=$PPO_MICRO_BATCH_SIZE_PER_GPU | vllm_mem=$GPU_MEM_UTIL"
 echo "steps    : $TOTAL_TRAINING_STEPS (batch $TRAIN_BATCH_SIZE, opd_size $OPD_TRAIN_SIZE)"
 echo "save     : every $SAVE_FREQ steps, keep last $MAX_ACTOR_CKPT_TO_KEEP"
-echo "eval     : $BENCHMARKS | n=$EVAL_N | max_tokens=$EVAL_MAX_TOKENS"
+echo "eval     : $BENCHMARKS | n=$EVAL_N | max_tokens=$EVAL_MAX_TOKENS | T=$EVAL_TEMPERATURE p=$EVAL_TOP_P k=$EVAL_TOP_K"
 echo "====================================="
 
 # Ensure the DAPO dedup file exists. The raw HF parquet contains the same
@@ -218,6 +224,9 @@ if [ "${SKIP_TRAIN:-0}" != "1" ]; then
     PLATEAU_ENABLE="$PLATEAU_ENABLE" \
     TEST_FREQ="$TEST_FREQ" \
     VAL_N="$VAL_N" \
+    VAL_TEMPERATURE="$EVAL_TEMPERATURE" \
+    VAL_TOP_P="$EVAL_TOP_P" \
+    VAL_TOP_K="$EVAL_TOP_K" \
     SAVE_FREQ="$SAVE_FREQ" \
     MAX_ACTOR_CKPT_TO_KEEP="$MAX_ACTOR_CKPT_TO_KEEP" \
     RUN_ID="$RUN_ID" \
@@ -278,8 +287,9 @@ eval_one() {
         --out-dir "$out_dir" \
         --n "$EVAL_N" \
         --max-tokens "$EVAL_MAX_TOKENS" \
-        --temperature 0.6 \
-        --top-p 0.95 \
+        --temperature "$EVAL_TEMPERATURE" \
+        --top-p "$EVAL_TOP_P" \
+        --top-k "$EVAL_TOP_K" \
         --max-model-len "$EVAL_MAX_MODEL_LEN" \
         --max-num-seqs "$EVAL_MAX_NUM_SEQS" \
         --gpu-memory-utilization "$EVAL_GPU_MEM_UTIL" \
