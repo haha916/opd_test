@@ -115,16 +115,6 @@ if [ "$SKIP_ENV" != "1" ]; then
     if [ ! -f "$VENV_DIR/.eval_ready" ]; then
         echo "installing vLLM (torch 2.9.0+cu128) ..."
         pip install -q "vllm==0.12.0"
-
-        echo "pinning eval dependencies ..."
-        pip install -q \
-            "torch==2.9.0" \
-            "transformers==4.57.1" \
-            "datasets==5.0.1" \
-            "pyarrow==21.0.0" \
-            "numpy==1.26.4" \
-            "pandas" \
-            "huggingface_hub"
         touch "$VENV_DIR/.eval_ready"
     fi
 else
@@ -133,7 +123,25 @@ else
     # shellcheck disable=SC1091
     source "$VENV_DIR/bin/activate"
 fi
-"$VENV_DIR/bin/python" -c "import vllm, transformers, datasets, torch; print('vllm', vllm.__version__, '| torch', torch.__version__)"
+
+# Always enforce the known-good pins (also repairs an older/partial env).
+# scipy>=1.18 / opencv>=5 / cupy>=14 require numpy>=2, which conflicts with
+# the numpy==1.26.4 that vLLM/transformers here are verified against;
+# datasets imports scipy.io and would crash at data preparation otherwise.
+echo "pinning eval dependencies ..."
+pip install -q \
+    "torch==2.9.0" \
+    "transformers==4.57.1" \
+    "datasets==5.0.1" \
+    "pyarrow==21.0.0" \
+    "numpy==1.26.4" \
+    "scipy==1.16.3" \
+    "opencv-python-headless==4.11.0.86" \
+    "cupy-cuda12x==13.6.0" \
+    "pandas" \
+    "huggingface_hub"
+
+"$VENV_DIR/bin/python" -c "import vllm, transformers, datasets, torch, scipy, numpy; print('vllm', vllm.__version__, '| torch', torch.__version__, '| scipy', scipy.__version__, '| numpy', numpy.__version__)"
 
 # ---------------------------------------------------------------------------
 # 3) Student model only
