@@ -60,6 +60,10 @@ done
 RUN_ID=${RUN_ID:-colab80}
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-80}
+# Prompt budget (in steps x batch). Defaults to the number of steps actually
+# run. Set OPD_DATA_STEPS=80 when training fewer steps so the data split and
+# prompt order stay identical to the 80-step baseline run.
+OPD_DATA_STEPS=${OPD_DATA_STEPS:-$TOTAL_TRAINING_STEPS}
 
 # GPU-aware defaults:
 #   80GB A100 -> 64 x 80 = 5120 prompts (repo default), micro-batch 4
@@ -81,7 +85,7 @@ else
     DEFAULT_GPU_MEM_UTIL=0.35
 fi
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-$DEFAULT_TRAIN_BATCH_SIZE}
-OPD_TRAIN_SIZE=${OPD_TRAIN_SIZE:-$((TRAIN_BATCH_SIZE * TOTAL_TRAINING_STEPS))}
+OPD_TRAIN_SIZE=${OPD_TRAIN_SIZE:-$((TRAIN_BATCH_SIZE * OPD_DATA_STEPS))}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-$TRAIN_BATCH_SIZE}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-$DEFAULT_MICRO_BATCH}
 
@@ -150,7 +154,7 @@ echo "student  : $MODEL_PATH"
 echo "teacher  : $TEACHER_MODEL_PATH"
 echo "data     : $DATA_DIR"
 echo "gpu      : ${VRAM_GB}GB | micro_batch=$PPO_MICRO_BATCH_SIZE_PER_GPU | vllm_mem=$GPU_MEM_UTIL"
-echo "steps    : $TOTAL_TRAINING_STEPS (batch $TRAIN_BATCH_SIZE, opd_size $OPD_TRAIN_SIZE)"
+echo "steps    : $TOTAL_TRAINING_STEPS (batch $TRAIN_BATCH_SIZE, opd_size $OPD_TRAIN_SIZE = batch x $OPD_DATA_STEPS)"
 echo "save     : every $SAVE_FREQ steps, keep last $MAX_ACTOR_CKPT_TO_KEEP"
 echo "mask     : ${ENTROPY_MASK:-<none>} (margin $ENTROPY_MASK_MARGIN)"
 echo "eval     : $BENCHMARKS | n=$EVAL_N | max_tokens=$EVAL_MAX_TOKENS | T=$EVAL_TEMPERATURE p=$EVAL_TOP_P k=$EVAL_TOP_K"

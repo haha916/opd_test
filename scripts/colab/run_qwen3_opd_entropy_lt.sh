@@ -20,6 +20,9 @@
 #   RUN_ID=entlt80-m005        # output directory / experiment tag
 #   OUTPUT_ROOT=/content/drive/MyDrive/outputs
 #   EVAL_BASE=1                # also evaluate step_000 in the new eval root
+#   TOTAL_TRAINING_STEPS=60    # fewer steps (plateau at 40 in the baseline)
+#   OPD_DATA_STEPS=80          # keep the baseline prompt budget/order
+#   SAVE_FREQ=20 MAX_ACTOR_CKPT_TO_KEEP=2   # keep only the needed checkpoints
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

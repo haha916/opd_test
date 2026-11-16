@@ -7,9 +7,10 @@
   Colab 就不会判 notebook 空闲而回收 runtime。
 - 结果全部写 Drive；万一还是被断，从 Cell 1 重跑，已完成的 step/benchmark 会自动跳过。
 - `EVAL_ROOT` / `CKPT_ROOT` 用脚本默认值；目录不同就改 Cell 6 顶部两行。
-- Cell 8–9 是新的**熵方向掩码**实验：只在学生熵 < 教师熵的位置训练，训练完再评测。
-  它们复用 Cell 2–5 的环境 / 模型 / 数据（训练还需要 4B 教师和 DAPO 数据，
-  如果 runtime 是新建的，先用 `bootstrap_colab.sh` 装好）。
+- Cell 8 是新的**熵方向掩码**实验：只在学生熵 < 教师熵的位置训练 60 步，
+  训练完自动评测 step 40 / 60。它复用 Cell 2–5 的环境 / 模型 / 数据
+  （训练还需要 4B 教师和 DAPO 数据；如果 runtime 是新建的，先用
+  `bootstrap_colab.sh` 装好）。
 
 ---
 
@@ -292,36 +293,50 @@ done
 
 ---
 
-## Cell 8 — 训练：只在「学生熵 < 教师熵」的位置做 OPD
+## Cell 8 — 训练 60 步 + 评测 step 40 / 60（只在学生熵 < 教师熵的位置）
 
-和基线 `colab80` 唯一的不同：每个 response 位置先算全词表熵
+基线 80 步的曲线（`report.md`）在 step 40 已进入平台期（23.40–24.38 分，
+spread 0.97），所以这个对照实验只跑 60 步，只保留并评测 step 40 和 step 60。
+
+- `TOTAL_TRAINING_STEPS=60`：训练 60 步；`OPD_DATA_STEPS=80` 让数据预算
+  （prompt 数量和顺序）与基线 80 步运行完全一致，前 60 步看到的 prompt 相同。
+- `SAVE_FREQ=20` + `MAX_ACTOR_CKPT_TO_KEEP=2`：在 20/40/60 保存，环形缓冲
+  最终只留 40 和 60，省 Drive 空间。
+- 训练完自动评测 `STEPS="60 40"`，结果写到
+  `/content/drive/MyDrive/outputs/eval/entlt60/report.md` 和 `curve.csv`。
+- 评测断点续跑；训练中途断开只能重跑。
+
+掩码和基线 `colab80` 的唯一区别：每个 response 位置先算全词表熵
 
 ```
 H_S = -Σ_v p_S(v) log p_S(v)        H_T = -Σ_v p_T(v) log p_T(v)
 ```
 
-只保留 `H_S < H_T - ENTROPY_MASK_MARGIN` 的位置（direction=`lt`，学生比教师更尖），
-在这些位置上做 sampled-token reverse KL；掩码每一步按当前学生重算，与之前的
-`entropy_dyn` 臂一致。损失按该步被选中位置的总数归一化。
+只保留 `H_S < H_T - ENTROPY_MASK_MARGIN` 的位置（direction=`lt`，学生比教师
+更尖），在这些位置上做 sampled-token reverse KL；掩码每一步按当前学生重算，
+损失按该步被选中位置的总数归一化。
 
-- 其它配置完全沿用 `run_qwen3_opd.sh`：0.6B 学生 + 4B-Instruct 教师、80 步、
-  每 10 步保存、环形保留最后 5 个（40/50/60/70/80）。
-- 默认 `SKIP_EVAL=1` 只训练；训练完再跑 Cell 9 评测。也可把 `SKIP_EVAL` 设为 0，
-  训练后自动评测（`EVAL_BASE=0`，不重复评 step_000）。
-- 输出目录：`/content/drive/MyDrive/outputs/*-entlt80-OPD-*`（在 Drive 上，断连不丢）。
-- 训练日志里重点看：`opd/entropy_mask_frac`（选中位置占比）、`opd/sample_kl`
-  （选中位置的 KL）、`opd/sample_kl_all`（全部位置的 KL）。
-- 想加 margin：`ENTROPY_MASK_MARGIN=0.05`；想改 tag：`RUN_ID=entlt80-m005`。
-- 中途断开只能重跑（训练脚本不支持断点续训）；评测是断点续跑的。
+常用开关（直接改 cell 顶部两行）：
+- 训练已完成、只想重跑评测：`SKIP_TRAIN=1`
+- 只想训练、先不评测：`SKIP_EVAL=1`
+- 加 margin：`ENTROPY_MASK_MARGIN=0.05`；同时改 `RUN_ID`，避免覆盖本次结果
+- 日志里重点看 `opd/entropy_mask_frac`（选中位置占比）、`opd/sample_kl`
+  （选中位置 KL）、`opd/sample_kl_all`（全部位置 KL）
 
 ```bash
 %%bash
 set -uo pipefail
 
 REPO=/content/OPSD_OnPolicyDistillation
+RUN_ID=${RUN_ID:-entlt60}
+OUTPUT_ROOT=${OUTPUT_ROOT:-/content/drive/MyDrive/outputs}
+SKIP_TRAIN=${SKIP_TRAIN:-0}
+SKIP_EVAL=${SKIP_EVAL:-0}
+
 [ -d "$REPO/.git" ] || { echo "先跑 Cell 2 克隆仓库"; exit 1; }
 git -C "$REPO" pull --ff-only || true
 
+# ---- 依赖检查 ----
 [ -x /content/verl_env/bin/python ] || {
   echo "缺少 /content/verl_env。先跑一次 bootstrap（装环境/模型/数据）："
   echo "  REPO_DIR=$REPO RUN_PIPELINE=0 bash $REPO/scripts/colab/bootstrap_colab.sh"
@@ -341,37 +356,29 @@ git -C "$REPO" pull --ff-only || true
 }
 [ -d /content/drive/MyDrive ] || { echo "先跑 Cell 1 挂载 Drive"; exit 1; }
 
-export RUN_ID=${RUN_ID:-entlt80}
+# ---- 训练：60 步，只保留 step 40 / 60 ----
+export RUN_ID OUTPUT_ROOT
 export ENTROPY_MASK=lt
 export ENTROPY_MASK_MARGIN=${ENTROPY_MASK_MARGIN:-0.0}
-export OUTPUT_ROOT=${OUTPUT_ROOT:-/content/drive/MyDrive/outputs}
-export SKIP_EVAL=${SKIP_EVAL:-1}
+export TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-60}
+export OPD_DATA_STEPS=${OPD_DATA_STEPS:-80}
+export SAVE_FREQ=${SAVE_FREQ:-20}
+export MAX_ACTOR_CKPT_TO_KEEP=${MAX_ACTOR_CKPT_TO_KEEP:-2}
 
-echo "RUN_ID=$RUN_ID | ENTROPY_MASK=$ENTROPY_MASK | margin=$ENTROPY_MASK_MARGIN | SKIP_EVAL=$SKIP_EVAL"
-bash "$REPO/scripts/colab/run_qwen3_opd_entropy_lt.sh"
-```
+if [ "$SKIP_TRAIN" != "1" ]; then
+  echo ">>> train: $TOTAL_TRAINING_STEPS steps | data budget $OPD_DATA_STEPS steps | mask lt margin $ENTROPY_MASK_MARGIN"
+  SKIP_EVAL=1 bash "$REPO/scripts/colab/run_qwen3_opd_entropy_lt.sh" || exit $?
+fi
+if [ "$SKIP_EVAL" = "1" ]; then
+  echo "SKIP_EVAL=1, done"
+  exit 0
+fi
 
----
-
-## Cell 9 — 评测 Cell 8 训练出的 checkpoint
-
-- 只评测 `run_id` 对应的运行目录（训练输出目录作为 `CKPT_ROOT`），不会误评基线的权重。
-- `LOCAL_CKPT_ROOT` 按 RUN_ID 分开，避免和基线评测的本地缓存 `step_080` 等串味。
-- 自动跳过已完成的 step/benchmark；断了重跑即可。
-- 结果：`/content/drive/MyDrive/outputs/eval/$RUN_ID/report.md` 和 `curve.csv`。
-
-```bash
-%%bash
-set -uo pipefail
-
-REPO=/content/OPSD_OnPolicyDistillation
-RUN_ID=${RUN_ID:-entlt80}
-OUTPUT_ROOT=${OUTPUT_ROOT:-/content/drive/MyDrive/outputs}
-
+# ---- 评测：只评 step 60 / 40 ----
 RUN_DIR=$(find "$OUTPUT_ROOT" -maxdepth 1 -type d -name "*-${RUN_ID}-OPD-*" \
   -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
 [ -n "${RUN_DIR:-}" ] || { echo "找不到 *-${RUN_ID}-OPD-* 运行目录"; exit 1; }
-echo "run dir  : $RUN_DIR"
+echo ">>> eval: $RUN_DIR"
 
 export CKPT_ROOT="$RUN_DIR"
 export EVAL_ROOT="$OUTPUT_ROOT/eval/$RUN_ID"
@@ -379,7 +386,7 @@ export LOCAL_CKPT_ROOT="/content/eval_ckpts/$RUN_ID"
 export PYTHON=${PYTHON:-/content/eval_env/bin/python}
 [ -x "$PYTHON" ] || export PYTHON=/content/verl_env/bin/python
 
-export STEPS=${STEPS:-"80 40 50 60 70"}
+export STEPS=${STEPS:-"60 40"}
 export EVAL_BASE=${EVAL_BASE:-0}
 export BENCHMARKS=${BENCHMARKS:-"aime24 aime25 amc23"}
 
