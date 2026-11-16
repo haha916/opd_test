@@ -43,6 +43,8 @@ from .losses import (
     SAMPLE_LOSS_TYPES,
     compute_sample_reverse_kl_loss,
     compute_teacher_token_stats,
+    sample_reverse_kl_token_terms,
+    select_entropy_mask,
 )
 
 logger = logging.getLogger(__name__)
@@ -238,6 +240,9 @@ class OPDWorker(AsyncActorRolloutRefWorker):
           opd_chunk_size: tokens per chunk for loss computation
           opd_sample_clip: optional clip on the stop-gradient log-ratio
                            (only used for sampled-token OPD)
+          opd_entropy_mask: optional "lt" | "gt" position mask for
+                            sampled-token OPD (H_S < H_T or H_S > H_T)
+          opd_entropy_mask_margin: margin (nats) added in the selected direction
         """
         assert self._is_actor, "update_opd requires actor role"
 
@@ -254,6 +259,32 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         chunk_size = data.meta_info.get("opd_chunk_size", 512)
         sample_clip = data.meta_info.get("opd_sample_clip", None)
         sample_mode = loss_type in SAMPLE_LOSS_TYPES
+
+        # Entropy-direction position mask (sampled-token OPD only):
+        #   "lt" -> train only where H_S < H_T - margin (student sharper)
+        #   "gt" -> train only where H_S > H_T + margin (student flatter)
+        entropy_mask = data.meta_info.get("opd_entropy_mask", None)
+        if isinstance(entropy_mask, str):
+            entropy_mask = entropy_mask.strip().lower()
+            if entropy_mask in {"", "none", "null", "false"}:
+                entropy_mask = None
+        if entropy_mask is not None:
+            if entropy_mask not in {"lt", "gt"}:
+                raise ValueError(
+                    f"opd_entropy_mask must be 'lt' or 'gt', got {entropy_mask!r}."
+                )
+            if not sample_mode:
+                raise ValueError(
+                    "opd_entropy_mask is only supported for sampled-token OPD "
+                    f"(sample_reverse_kl), got loss_type={loss_type!r}."
+                )
+        entropy_mask_margin = float(data.meta_info.get("opd_entropy_mask_margin", 0.0) or 0.0)
+        use_sample_weights = "sample_weights" in data.batch
+        if entropy_mask is not None and use_sample_weights:
+            raise ValueError(
+                "opd_entropy_mask cannot be combined with per-sample reward weighting "
+                "(opd.reward_beta)."
+            )
 
         use_remove_padding = self.config.model.get("use_remove_padding", False)
         micro_batch_size = self.config.actor.get(
@@ -289,7 +320,10 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 )
             else:
                 forward_fn = self._forward_logits_unpadded if use_remove_padding else self._forward_logits_padded
-            teacher_logits_cache = []  # list of ((teacher_logits_cpu | (targets_cpu, logprobs_cpu)), is_valid)
+            # Whether the entropy-direction mask needs H_T alongside log pi_T(y).
+            compute_teacher_entropy = sample_mode and entropy_mask is not None
+            # list of ((teacher_logits_cpu | (targets_cpu, logprobs_cpu[, entropy_cpu])), is_valid)
+            teacher_logits_cache = []
 
             for i, micro_batch in enumerate(micro_batches):
                 micro_batch = micro_batch.to(device)
@@ -318,17 +352,23 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 if sample_mode:
                     with torch.no_grad():
                         # The token-logprob helpers always return (targets, logprobs, entropy);
-                        # the teacher only caches the first two.
-                        t_targets, t_logprobs, _ = forward_fn(
+                        # the teacher only caches entropy when the position mask needs H_T.
+                        t_targets, t_logprobs, t_entropy = forward_fn(
                             self.ref_module_fsdp, t_input_ids, t_attention_mask, t_position_ids,
-                            t_loss_mask, chunk_size=chunk_size, compute_entropy=False,
+                            t_loss_mask, chunk_size=chunk_size,
+                            compute_entropy=compute_teacher_entropy,
                         )
-                    logger.info("[OPD-MEM] phase1 micro_batch[%d]: cached teacher token logprobs shape=%s",
-                                i, list(t_logprobs.shape))
+                    logger.info("[OPD-MEM] phase1 micro_batch[%d]: cached teacher token logprobs shape=%s%s",
+                                i, list(t_logprobs.shape),
+                                ", with entropy" if compute_teacher_entropy else "")
                     teacher_logits_cache.append(
-                        ((t_targets.to("cpu"), t_logprobs.float().to("cpu")), True)
+                        ((
+                            t_targets.to("cpu"),
+                            t_logprobs.float().to("cpu"),
+                            t_entropy.float().to("cpu") if compute_teacher_entropy else None,
+                        ), True)
                     )
-                    del t_targets, t_logprobs
+                    del t_targets, t_logprobs, t_entropy
                 else:
                     with torch.no_grad():
                         teacher_logits = forward_fn(
@@ -359,13 +399,14 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=device)
             _mem("phase2-after-optimizer-load")
 
-            use_sample_weights = "sample_weights" in data.batch
             metrics = self._opd_training_step(
                 micro_batches, teacher_logits_cache,
                 loss_type=loss_type, beta=beta, chunk_size=chunk_size,
                 use_remove_padding=use_remove_padding, device=device, batch_size=batch_size,
                 use_sample_weights=use_sample_weights,
                 sample_mode=sample_mode, sample_clip=sample_clip,
+                entropy_mask_direction=entropy_mask,
+                entropy_mask_margin=entropy_mask_margin,
             )
 
             lr = self.actor_lr_scheduler.get_last_lr()[0]
@@ -399,6 +440,8 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         use_sample_weights: bool = False,
         sample_mode: bool = False,
         sample_clip: float | None = None,
+        entropy_mask_direction: str | None = None,
+        entropy_mask_margin: float = 0.0,
     ) -> dict:
         """Core OPD training with pre-computed teacher logits.
 
@@ -411,11 +454,24 @@ class OPDWorker(AsyncActorRolloutRefWorker):
           2. Student forward (trainable actor) on student_input_ids -> logits
           3. Compute divergence loss (chunk-wise for memory efficiency)
           4. Backward with gradient accumulation scaling
+
+        When ``entropy_mask_direction`` is set, only response positions where
+        the student/teacher entropy gap points in that direction contribute
+        (the mask is recomputed from the current student every step). The
+        masked surrogate is normalized by the step's *global* selected-token
+        count: each micro-batch back-propagates its selected sum and all
+        gradients are divided by the total selected count before clipping,
+        matching the fixed-pool dynamic-entropy arms.
         """
         self.actor_module_fsdp.train()
 
         active_micro_batches = sum(1 for _, is_valid in teacher_logits_cache if is_valid)
         grad_accum = max(1, active_micro_batches)
+        masked_mode = entropy_mask_direction is not None
+        if masked_mode and not sample_mode:
+            raise ValueError("entropy_mask_direction requires sample_mode=True")
+        if masked_mode and use_sample_weights:
+            raise ValueError("entropy_mask_direction cannot be combined with sample_weights")
 
         loss_fn = None if sample_mode else LOSS_FN_MAP[loss_type]
         if sample_mode:
@@ -429,10 +485,15 @@ class OPDWorker(AsyncActorRolloutRefWorker):
 
         self.actor_optimizer.zero_grad()
         total_loss = 0.0
+        total_loss_sum = 0.0  # selected-token surrogate sum (masked mode)
         total_entropy_sum = 0.0
-        total_tokens = 0
+        total_teacher_entropy_sum = 0.0
+        total_teacher_entropy_count = 0
+        total_tokens = 0  # tokens that contributed to the loss
+        total_response_tokens = 0  # all response tokens before masking
         total_rows = 0
-        total_sample_kl = 0.0
+        total_sample_kl = 0.0  # sum over selected (or all) tokens
+        total_sample_kl_all_sum = 0.0  # sum over all response tokens
 
         def _mem2(tag):
             alloc = torch.cuda.memory_allocated() / (1024**3)
@@ -464,10 +525,18 @@ class OPDWorker(AsyncActorRolloutRefWorker):
 
             _mem2(f"phase2-mb{i}-before-teacher-to-gpu")
 
+            position_mask = None
+            teacher_entropy = None
             if sample_mode:
-                cached_targets, cached_teacher_logprobs = cached_teacher_logits
+                cached_teacher_entropy = None
+                if len(cached_teacher_logits) == 3:
+                    cached_targets, cached_teacher_logprobs, cached_teacher_entropy = cached_teacher_logits
+                else:
+                    cached_targets, cached_teacher_logprobs = cached_teacher_logits
                 teacher_targets = cached_targets.to(device)
                 teacher_logprobs = cached_teacher_logprobs.to(device=device, dtype=torch.float32)
+                if cached_teacher_entropy is not None:
+                    teacher_entropy = cached_teacher_entropy.to(device=device, dtype=torch.float32)
                 logger.info("[OPD-MEM] phase2 micro_batch[%d]: student_ids shape=%s, cached teacher logprobs shape=%s",
                             i, list(s_input_ids.shape), list(teacher_logprobs.shape))
                 _mem2(f"phase2-mb{i}-after-teacher-to-gpu")
@@ -491,6 +560,16 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 if student_targets.numel() == 0:
                     del teacher_logprobs
                     continue
+
+                if masked_mode:
+                    if teacher_entropy is None:
+                        raise RuntimeError(
+                            "Entropy position mask requested but the teacher entropy cache is missing."
+                        )
+                    position_mask = select_entropy_mask(
+                        token_entropy, teacher_entropy,
+                        direction=entropy_mask_direction, margin=entropy_mask_margin,
+                    )
             else:
                 teacher_logits = cached_teacher_logits.to(device)
                 logger.info("[OPD-MEM] phase2 micro_batch[%d]: student_ids shape=%s, cached_teacher shape=%s",
@@ -540,6 +619,7 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                             clip=sample_clip,
                         )
                         total_sample_kl += kl_si.item() * n_tok
+                        total_sample_kl_all_sum += kl_si.item() * n_tok
                     else:
                         t_slice = teacher_logits[token_offset:token_offset + n_tok]
                         s_slice = student_logits[token_offset:token_offset + n_tok]
@@ -552,16 +632,43 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 sample_losses = torch.stack(sample_losses)
                 loss = (sample_losses * mb_sample_weights).sum() / mb_sample_weights.sum()
                 n_tokens = int(per_sample_token_counts.sum().item())
+                total_response_tokens += n_tokens
+                backward_loss = loss / grad_accum
             else:
                 if sample_mode:
-                    loss, n_tokens, kl_value = compute_sample_reverse_kl_loss(
-                        teacher_logprobs, student_logprobs, clip=sample_clip,
-                    )
-                    total_sample_kl += kl_value.item() * n_tokens
+                    n_all = int(student_logprobs.shape[0])
+                    total_response_tokens += n_all
+                    if masked_mode:
+                        token_terms, advantage = sample_reverse_kl_token_terms(
+                            teacher_logprobs, student_logprobs, clip=sample_clip,
+                        )
+                        total_sample_kl_all_sum += float(advantage.sum().item())
+                        n_tokens = int(position_mask.sum().item())
+                        if n_tokens > 0:
+                            loss_sum = token_terms[position_mask].sum()
+                            loss = loss_sum.detach() / n_tokens
+                            total_loss_sum += float(loss_sum.detach().item())
+                            total_sample_kl += float(advantage[position_mask].sum().item())
+                            backward_loss = loss_sum
+                        else:
+                            # No selected position in this micro-batch: skip backward.
+                            loss = student_logprobs.sum() * 0.0
+                            backward_loss = None
+                    else:
+                        loss, n_tokens, kl_value = compute_sample_reverse_kl_loss(
+                            teacher_logprobs, student_logprobs, clip=sample_clip,
+                        )
+                        total_sample_kl += kl_value.item() * n_tokens
+                        total_sample_kl_all_sum += kl_value.item() * n_tokens
+                        backward_loss = loss / grad_accum
                 elif loss_type == "jsd":
                     loss, n_tokens = loss_fn(teacher_logits, student_logits, beta=beta, chunk_size=chunk_size)
+                    total_response_tokens += n_tokens
+                    backward_loss = loss / grad_accum
                 else:
                     loss, n_tokens = loss_fn(teacher_logits, student_logits, chunk_size=chunk_size)
+                    total_response_tokens += n_tokens
+                    backward_loss = loss / grad_accum
 
             if sample_mode:
                 del teacher_logprobs
@@ -576,9 +683,12 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 with torch.no_grad():
                     token_entropy = entropy_from_logits_with_chunking(student_logits.float(), chunk_size=chunk_size)
             total_entropy_sum += token_entropy.detach().sum().item()
+            if teacher_entropy is not None:
+                total_teacher_entropy_sum += teacher_entropy.sum().item()
+                total_teacher_entropy_count += teacher_entropy.numel()
 
-            scaled_loss = loss / grad_accum
-            scaled_loss.backward()
+            if backward_loss is not None:
+                backward_loss.backward()
             _mem2(f"phase2-mb{i}-after-backward")
 
             total_loss += loss.detach().item()
@@ -589,15 +699,36 @@ class OPDWorker(AsyncActorRolloutRefWorker):
             self.actor_optimizer.zero_grad()
             metrics = {
                 "opd/loss": 0.0,
-                "opd/entropy": 0.0,
+                "opd/entropy": total_entropy_sum / max(1, total_response_tokens),
                 "opd/grad_norm": 0.0,
                 "opd/num_tokens": 0,
+                "opd/response_tokens": int(total_response_tokens),
                 "opd/batch_size": int(batch_size),
                 "opd/valid_rows": int(total_rows),
             }
             if sample_mode:
                 metrics["opd/sample_kl"] = 0.0
+                metrics["opd/sample_kl_all"] = (
+                    total_sample_kl_all_sum / max(1, total_response_tokens)
+                )
+            if masked_mode:
+                metrics["opd/entropy_mask_tokens"] = 0
+                metrics["opd/entropy_mask_frac"] = 0.0
+                metrics["opd/teacher_entropy"] = (
+                    total_teacher_entropy_sum / max(1, total_teacher_entropy_count)
+                )
             return metrics
+
+        # Masked mode back-propagates the selected-token surrogate sum per
+        # micro-batch; normalize the accumulated gradient by the step's global
+        # selected-token count so the update equals the mean over selected
+        # positions (matching the fixed-pool dynamic-entropy arms).
+        if masked_mode:
+            # total_tokens is the selected-token count in masked mode.
+            inv_selected = 1.0 / total_tokens
+            for param in self.actor_module_fsdp.parameters():
+                if param.grad is not None:
+                    param.grad.mul_(inv_selected)
 
         # Gradient clipping and optimizer step
         grad_clip = self.config.actor.get("grad_clip", 1.0)
@@ -618,16 +749,25 @@ class OPDWorker(AsyncActorRolloutRefWorker):
             self.actor_optimizer.zero_grad()
 
         metrics = {
-            "opd/loss": total_loss / max(1, active_micro_batches),
-            "opd/entropy": total_entropy_sum / max(1, total_tokens),
+            # In masked mode the loss is the selected-token mean surrogate;
+            # otherwise keep the micro-batch-mean convention.
+            "opd/loss": (total_loss_sum / max(1, total_tokens)) if masked_mode
+                        else (total_loss / max(1, active_micro_batches)),
+            "opd/entropy": total_entropy_sum / max(1, total_response_tokens),
             "opd/grad_norm": grad_norm.detach().item(),
             "opd/num_tokens": int(total_tokens),
+            "opd/response_tokens": int(total_response_tokens),
             "opd/batch_size": batch_size,
             "opd/valid_rows": int(total_rows),
         }
         if sample_mode:
             # Token-weighted mean log-ratio: an unbiased estimate of KL(pi_S || pi_T).
             metrics["opd/sample_kl"] = total_sample_kl / max(1, total_tokens)
+            metrics["opd/sample_kl_all"] = total_sample_kl_all_sum / max(1, total_response_tokens)
+        if masked_mode:
+            metrics["opd/entropy_mask_tokens"] = int(total_tokens)
+            metrics["opd/entropy_mask_frac"] = total_tokens / max(1, total_response_tokens)
+            metrics["opd/teacher_entropy"] = total_teacher_entropy_sum / max(1, total_teacher_entropy_count)
         return metrics
 
     def _extract_response_target_ids_padded(self, input_ids, loss_mask):

@@ -29,6 +29,7 @@ from verl.trainer.ppo.reward import get_custom_reward_fn
 from verl.utils.metric import reduce_metrics
 
 from .batch_builder import build_opd_batch
+from .losses import SAMPLE_LOSS_TYPES
 
 py_logger = logging.getLogger(__name__)
 
@@ -89,6 +90,27 @@ class OPDTrainer(RayPPOTrainer):
         self.sample_clip = opd_cfg.get("sample_clip", None)
         if self.sample_clip is not None and self.sample_clip <= 0:
             self.sample_clip = None
+        # Entropy-direction position mask (sampled-token OPD only):
+        #   null/none -> every sampled position
+        #   "lt"      -> only H_S < H_T - margin (student sharper)
+        #   "gt"      -> only H_S > H_T + margin (student flatter)
+        self.entropy_mask = opd_cfg.get("entropy_mask", None)
+        if isinstance(self.entropy_mask, str):
+            self.entropy_mask = self.entropy_mask.strip().lower()
+            if self.entropy_mask in {"", "none", "null", "false"}:
+                self.entropy_mask = None
+        if self.entropy_mask is not None and self.entropy_mask not in {"lt", "gt"}:
+            raise ValueError(
+                f"opd.entropy_mask must be 'lt', 'gt' or null, got {self.entropy_mask!r}."
+            )
+        if self.entropy_mask is not None and self.loss_type not in SAMPLE_LOSS_TYPES:
+            raise ValueError(
+                "opd.entropy_mask is only supported for sampled-token OPD "
+                f"(loss_type in {sorted(SAMPLE_LOSS_TYPES)}), got {self.loss_type!r}."
+            )
+        self.entropy_mask_margin = float(opd_cfg.get("entropy_mask_margin", 0.0) or 0.0)
+        if self.entropy_mask is not None and self.reward_beta is not None:
+            raise ValueError("opd.entropy_mask cannot be combined with opd.reward_beta weighting.")
         freeze_lm_head = opd_cfg.get("freeze_lm_head", False)
         if isinstance(freeze_lm_head, str):
             freeze_lm_head = freeze_lm_head.strip().lower() in {"true", "1", "yes", "on"}
@@ -556,6 +578,9 @@ class OPDTrainer(RayPPOTrainer):
                     opd_batch.meta_info["opd_chunk_size"] = self.chunk_size
                     if self.sample_clip is not None:
                         opd_batch.meta_info["opd_sample_clip"] = self.sample_clip
+                    if self.entropy_mask is not None:
+                        opd_batch.meta_info["opd_entropy_mask"] = self.entropy_mask
+                        opd_batch.meta_info["opd_entropy_mask_margin"] = self.entropy_mask_margin
                     if self.reward_beta is not None:
                         opd_batch.meta_info["opd_reward_beta"] = self.reward_beta
 

@@ -362,10 +362,75 @@ def compute_teacher_token_stats(
     return torch.cat(entropy_parts), torch.cat(prob_parts)
 
 
+def sample_reverse_kl_token_terms(
+    teacher_token_logprobs: torch.Tensor,
+    student_token_logprobs: torch.Tensor,
+    clip: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Unreduced per-token terms of the sampled-token reverse KL surrogate.
+
+    For each response position t with y_t ~ pi_S(. | x_<t):
+
+        d_t      = log pi_S(y_t) - log pi_T(y_t)   (stop-gradient advantage)
+        term_t   = d_t * log pi_S(y_t)             (with grad on log pi_S)
+
+    Summing ``term_t`` over a token set and dividing by its size gives the
+    sampled-token reverse KL loss on that set. Returning the unreduced terms
+    lets the caller normalize by a *global* selected-token count after
+    accumulating several micro-batches (position-mask training).
+
+    Args:
+        teacher_token_logprobs: (N,) log pi_T(y_t), detached.
+        student_token_logprobs: (N,) log pi_S(y_t), with grad.
+        clip: Optional symmetric clip on the stop-gradient advantage.
+
+    Returns:
+        (token_terms, advantage) — both (N,); ``advantage`` is detached.
+    """
+    with torch.no_grad():
+        advantage = student_token_logprobs.detach() - teacher_token_logprobs.detach()
+        if clip is not None and clip > 0:
+            advantage = advantage.clamp(-clip, clip)
+    token_terms = advantage * student_token_logprobs
+    return token_terms, advantage
+
+
+def select_entropy_mask(
+    student_entropy: torch.Tensor,
+    teacher_entropy: torch.Tensor,
+    direction: str,
+    margin: float = 0.0,
+) -> torch.Tensor:
+    """Select response positions by the sign of the student/teacher entropy gap.
+
+    Args:
+        student_entropy: (N,) H(p_S) at each response position.
+        teacher_entropy: (N,) H(p_T) at each response position.
+        direction: ``"lt"`` selects positions where the student is sharper than
+            the teacher (H_S < H_T - margin); ``"gt"`` selects positions where
+            the student is flatter (H_S > H_T + margin).
+        margin: Optional margin (in nats) that must be exceeded.
+
+    Returns:
+        (N,) bool tensor.
+    """
+    if student_entropy.shape != teacher_entropy.shape:
+        raise ValueError(
+            f"entropy shape mismatch: student {tuple(student_entropy.shape)} "
+            f"vs teacher {tuple(teacher_entropy.shape)}"
+        )
+    if direction == "lt":
+        return student_entropy < teacher_entropy - margin
+    if direction == "gt":
+        return student_entropy > teacher_entropy + margin
+    raise ValueError(f"Unknown entropy-mask direction {direction!r}; expected 'lt' or 'gt'.")
+
+
 def compute_sample_reverse_kl_loss(
     teacher_token_logprobs: torch.Tensor,
     student_token_logprobs: torch.Tensor,
     clip: float | None = None,
+    position_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, int, torch.Tensor]:
     """Sampled-token reverse KL for on-policy distillation.
 
@@ -390,6 +455,9 @@ def compute_sample_reverse_kl_loss(
         clip: Optional symmetric clip on the stop-gradient advantage d_t.
             Guards against rare tokens where the student/teacher log-ratio is
             extreme. ``None`` or <= 0 disables clipping.
+        position_mask: Optional (N,) bool tensor. When given, only masked
+            positions contribute; the loss is normalized by their count
+            (position-mask training). ``num_tokens`` is the selected count.
 
     Returns:
         (loss, n_tokens, kl_estimate) — scalar PG loss, token count, and the
@@ -400,14 +468,28 @@ def compute_sample_reverse_kl_loss(
         zero = student_token_logprobs.sum() * 0.0
         return zero, 0, zero.detach()
 
-    with torch.no_grad():
-        advantage = student_token_logprobs.detach() - teacher_token_logprobs.detach()
-        if clip is not None and clip > 0:
-            advantage = advantage.clamp(-clip, clip)
-        kl_estimate = advantage.mean()
+    teacher_token_logprobs = teacher_token_logprobs.reshape(-1)
+    student_token_logprobs = student_token_logprobs.reshape(-1)
 
-    loss = (advantage * student_token_logprobs).sum() / n_tokens
-    return loss, n_tokens, kl_estimate
+    if position_mask is not None:
+        position_mask = position_mask.reshape(-1).to(device=student_token_logprobs.device, dtype=torch.bool)
+        if position_mask.shape[0] != n_tokens:
+            raise ValueError(
+                f"position_mask has {position_mask.shape[0]} entries for {n_tokens} tokens"
+            )
+        n_selected = int(position_mask.sum().item())
+        if n_selected == 0:
+            zero = student_token_logprobs.sum() * 0.0
+            return zero, 0, zero.detach()
+        teacher_token_logprobs = teacher_token_logprobs[position_mask]
+        student_token_logprobs = student_token_logprobs[position_mask]
+        n_tokens = n_selected
+
+    token_terms, advantage = sample_reverse_kl_token_terms(
+        teacher_token_logprobs, student_token_logprobs, clip=clip
+    )
+    loss = token_terms.sum() / n_tokens
+    return loss, n_tokens, advantage.mean()
 
 
 LOSS_FN_MAP = {

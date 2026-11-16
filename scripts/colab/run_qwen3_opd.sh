@@ -103,6 +103,12 @@ EVAL_RESPONSE_LENGTH=${EVAL_RESPONSE_LENGTH:-16382}
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-$DEFAULT_GPU_MEM_UTIL}
 FREEZE_LM_HEAD=${FREEZE_LM_HEAD:-False}
 ENABLE_THINKING=${ENABLE_THINKING:-False}
+# Entropy-direction position mask for sampled-token OPD:
+#   ""   -> every sampled position (baseline)
+#   "lt" -> only positions with H_S < H_T - margin (student sharper)
+#   "gt" -> only positions with H_S > H_T + margin (student flatter)
+ENTROPY_MASK=${ENTROPY_MASK:-}
+ENTROPY_MASK_MARGIN=${ENTROPY_MASK_MARGIN:-0.0}
 
 if "$PYTHON" -c "import flash_attn" >/dev/null 2>&1; then
     USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-True}
@@ -146,6 +152,7 @@ echo "data     : $DATA_DIR"
 echo "gpu      : ${VRAM_GB}GB | micro_batch=$PPO_MICRO_BATCH_SIZE_PER_GPU | vllm_mem=$GPU_MEM_UTIL"
 echo "steps    : $TOTAL_TRAINING_STEPS (batch $TRAIN_BATCH_SIZE, opd_size $OPD_TRAIN_SIZE)"
 echo "save     : every $SAVE_FREQ steps, keep last $MAX_ACTOR_CKPT_TO_KEEP"
+echo "mask     : ${ENTROPY_MASK:-<none>} (margin $ENTROPY_MASK_MARGIN)"
 echo "eval     : $BENCHMARKS | n=$EVAL_N | max_tokens=$EVAL_MAX_TOKENS | T=$EVAL_TEMPERATURE p=$EVAL_TOP_P k=$EVAL_TOP_K"
 echo "====================================="
 
@@ -221,6 +228,8 @@ if [ "${SKIP_TRAIN:-0}" != "1" ]; then
     USE_REMOVE_PADDING="$USE_REMOVE_PADDING" \
     ATTN_IMPL="$ATTN_IMPL" \
     FREEZE_LM_HEAD="$FREEZE_LM_HEAD" \
+    ENTROPY_MASK="$ENTROPY_MASK" \
+    ENTROPY_MASK_MARGIN="$ENTROPY_MASK_MARGIN" \
     PLATEAU_ENABLE="$PLATEAU_ENABLE" \
     TEST_FREQ="$TEST_FREQ" \
     VAL_N="$VAL_N" \

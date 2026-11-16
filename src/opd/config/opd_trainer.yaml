@@ -110,6 +110,18 @@ opd:
   # OPD. null disables clipping.
   sample_clip: null
 
+  # Entropy-direction position mask for sampled-token OPD (sample_reverse_kl).
+  # At every response position compare full-vocabulary student/teacher entropy:
+  #   H_S = -sum_v p_S(v) log p_S(v),   H_T = -sum_v p_T(v) log p_T(v)
+  #   null: train at every sampled position (default)
+  #   "lt": only positions with H_S < H_T - margin (student sharper)
+  #   "gt": only positions with H_S > H_T + margin (student flatter)
+  # The mask is recomputed from the current student every step and the loss is
+  # normalized by the step's total selected-token count. Not compatible with
+  # reward_beta weighting.
+  entropy_mask: null
+  entropy_mask_margin: 0.0
+
   # Freeze the vocabulary-sized output projection (lm_head) of the student.
   # The head still produces the logits needed by the sampled-token loss, but
   # its weight receives no gradient and is never updated. The weight-gradient

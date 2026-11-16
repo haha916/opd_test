@@ -94,6 +94,28 @@ val_top_k=${VAL_TOP_K:--1}
 opd_loss_type=${OPD_LOSS_TYPE:-sample_reverse_kl}
 opd_chunk_size=${OPD_CHUNK_SIZE:-256}
 sample_clip=${SAMPLE_CLIP:-}
+
+# Entropy-direction position mask (sampled-token OPD only):
+#   ENTROPY_MASK=lt  -> train only where H_S < H_T - margin (student sharper)
+#   ENTROPY_MASK=gt  -> train only where H_S > H_T + margin (student flatter)
+#   unset            -> train at every sampled position (baseline)
+opd_entropy_mask=${ENTROPY_MASK:-}
+case "$(echo "$opd_entropy_mask" | tr '[:upper:]' '[:lower:]')" in
+    ""|none|null|false) opd_entropy_mask="" ;;
+    lt) opd_entropy_mask=lt ;;
+    gt) opd_entropy_mask=gt ;;
+    *) echo "ERROR: ENTROPY_MASK must be lt, gt or empty, got '$ENTROPY_MASK'"; exit 1 ;;
+esac
+entropy_mask_margin=${ENTROPY_MASK_MARGIN:-0.0}
+case "$opd_loss_type" in
+    sample_reverse_kl|sampled_reverse_kl|sample_kl|sample_opd) ;;
+    *)
+        if [ -n "$opd_entropy_mask" ]; then
+            echo "ERROR: ENTROPY_MASK requires a sampled-token loss type, got '$opd_loss_type'."
+            exit 1
+        fi
+        ;;
+esac
 # Freeze the student's vocabulary-sized output projection (lm_head).
 freeze_lm_head=${FREEZE_LM_HEAD:-False}
 case "$(echo "$freeze_lm_head" | tr '[:upper:]' '[:lower:]')" in
@@ -222,7 +244,11 @@ head_suffix=""
 if [ "$freeze_lm_head" = "True" ]; then
     head_suffix="-freeze-head"
 fi
-EXP_NAME=${MODEL_NAME_SAFE}-${RUN_ID}-OPD-${opd_loss_type}-teacher-${TEACHER_NAME}-lr${learning_rate}-bs${train_batch_size}-steps${total_training_steps}${head_suffix}
+mask_suffix=""
+if [ -n "$opd_entropy_mask" ]; then
+    mask_suffix="-ent${opd_entropy_mask}-m${entropy_mask_margin}"
+fi
+EXP_NAME=${MODEL_NAME_SAFE}-${RUN_ID}-OPD-${opd_loss_type}-teacher-${TEACHER_NAME}-lr${learning_rate}-bs${train_batch_size}-steps${total_training_steps}${head_suffix}${mask_suffix}
 
 OUTPUT_ROOT=${OUTPUT_ROOT:-"${REPO_ROOT}/outputs"}
 output_dir="${OUTPUT_ROOT}/${EXP_NAME}"
@@ -245,6 +271,7 @@ echo "rest_file: $REST_FILE"
 echo "learning_rate: $learning_rate"
 echo "enable_thinking: $enable_thinking (shared student+teacher input sequence)"
 echo "freeze_lm_head: $freeze_lm_head"
+echo "entropy_mask: ${opd_entropy_mask:-<none>} (margin=$entropy_mask_margin)"
 echo "train_response_length: $train_response_length"
 echo "eval_response_length: $eval_response_length"
 echo "test_freq: $test_freq (val_n=$val_n, aime24/aime25; <=0 disables all validation)"
@@ -315,6 +342,8 @@ python -m opd.main_opd \
     opd.max_length=$opd_max_length \
     opd.freeze_lm_head=$freeze_lm_head \
     ${sample_clip:+"opd.sample_clip=$sample_clip"} \
+    ${opd_entropy_mask:+"opd.entropy_mask=$opd_entropy_mask"} \
+    ${opd_entropy_mask:+"opd.entropy_mask_margin=$entropy_mask_margin"} \
     opd.train_max_response_length=$train_response_length \
     opd.eval_max_response_length=$eval_response_length \
     opd.plateau.enable=$plateau_enable \

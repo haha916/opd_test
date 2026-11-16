@@ -20,7 +20,7 @@ from opd.freeze import (
     freeze_output_projection,
     is_frozen_output_projection,
 )
-from opd.losses import compute_sample_reverse_kl_loss
+from opd.losses import compute_sample_reverse_kl_loss, select_entropy_mask
 from opd.opd_trainer import OPDTrainer
 from opd.opd_worker import OPDWorker
 
@@ -46,6 +46,58 @@ def test_sample_reverse_kl_gradient():
     assert torch.allclose(z_student.grad, expected_grad, atol=1e-6)
     assert torch.allclose(kl_estimate, advantage.mean())
     print("PASS sample_reverse_kl gradient matches sg(d_t) * grad log pi_S")
+
+
+def test_sample_reverse_kl_masked():
+    torch.manual_seed(2)
+    n, vocab = 6, 7
+    z_student = torch.randn(n, vocab, requires_grad=True)
+    z_teacher = torch.randn(n, vocab)
+    targets = torch.randint(0, vocab, (n,))
+
+    lp_student = F.log_softmax(z_student, -1).gather(-1, targets[:, None]).squeeze(-1)
+    lp_teacher = F.log_softmax(z_teacher, -1).gather(-1, targets[:, None]).squeeze(-1)
+    mask = torch.tensor([True, False, True, True, False, False])
+
+    loss, num_tokens, kl_estimate = compute_sample_reverse_kl_loss(
+        lp_teacher, lp_student, position_mask=mask
+    )
+    loss.backward()
+
+    advantage = (lp_student.detach() - lp_teacher).detach()
+    expected_grad = mask[:, None].float() * advantage[:, None] * (
+        F.one_hot(targets, vocab).float() - F.softmax(z_student.detach(), -1)
+    ) / int(mask.sum())
+    assert num_tokens == int(mask.sum())
+    assert torch.allclose(z_student.grad, expected_grad, atol=1e-6)
+    assert torch.allclose(kl_estimate, advantage[mask].mean())
+
+    # An all-false mask yields a zero loss, zero gradient and no counted tokens.
+    z2 = z_student.detach().clone().requires_grad_(True)
+    lp2 = F.log_softmax(z2, -1).gather(-1, targets[:, None]).squeeze(-1)
+    loss0, n0, _ = compute_sample_reverse_kl_loss(
+        lp_teacher, lp2, position_mask=torch.zeros(n, dtype=torch.bool)
+    )
+    loss0.backward()
+    assert n0 == 0 and loss0.item() == 0.0
+    assert z2.grad is not None and torch.count_nonzero(z2.grad) == 0
+    print("PASS masked sample_reverse_kl trains only selected positions")
+
+
+def test_entropy_mask_selection():
+    hs = torch.tensor([0.1, 0.5, 0.9, 0.3])
+    ht = torch.tensor([0.4, 0.4, 0.4, 0.4])
+    assert select_entropy_mask(hs, ht, "lt").tolist() == [True, False, False, True]
+    assert select_entropy_mask(hs, ht, "gt").tolist() == [False, True, True, False]
+    assert select_entropy_mask(hs, ht, "lt", margin=0.2).tolist() == [True, False, False, False]
+    assert select_entropy_mask(hs, ht, "gt", margin=0.2).tolist() == [False, False, True, False]
+    try:
+        select_entropy_mask(hs, ht, "sideways")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for unknown direction")
+    print("PASS entropy mask selects H_S < H_T (lt) / H_S > H_T (gt) with margin")
 
 
 def test_token_logprob_helper():
@@ -255,6 +307,8 @@ def test_plateau_selection():
 
 if __name__ == "__main__":
     test_sample_reverse_kl_gradient()
+    test_sample_reverse_kl_masked()
+    test_entropy_mask_selection()
     test_token_logprob_helper()
     test_freeze_output_projection()
     test_freeze_lm_head_flag_parsing()
