@@ -8,8 +8,8 @@
 - 结果全部写 Drive；万一还是被断，从 Cell 1 重跑，已完成的 step/benchmark 会自动跳过。
 - `EVAL_ROOT` / `CKPT_ROOT` 用脚本默认值；目录不同就改 Cell 6 顶部两行。
 - Cell 8 是新的**熵方向掩码**实验，并且是**自包含**的：新运行时 `/content`
-  全部丢失也没关系，它会自动 clone 仓库、安装 verl 环境、下载学生/教师模型
-  和数据，然后训练 60 步并评测 step 40 / 60（前提是 Drive 已挂载）。
+  全部丢失也没关系，它会自动挂载 Drive、clone 仓库、安装 verl 环境、下载
+  学生/教师模型和数据，然后训练 60 步并评测 step 40 / 60。
 
 ---
 
@@ -292,26 +292,27 @@ done
 
 ---
 
-## Cell 8 — 一键：环境/数据准备 + 训练 60 步 + 评测 step 40 / 60
+## Cell 8 — 一键：挂载 Drive + 环境/数据准备 + 训练 60 步 + 评测 40 / 60
 
 Colab 删除运行时后 `/content` 全部丢失（代码、venv、模型、数据），只有 Drive
-保留。所以这个 cell 是**自包含**的：先按需完成（缺什么补什么）
+保留。这个 Python cell 是**自包含**的：
 
-1. clone/更新 `haha916/opd_test` 仓库
-2. 创建 `/content/verl_env`（vLLM + verl + 版本 pin + FlashAttention，训练/评测共用）
-3. 下载 Qwen3-0.6B 学生 + Qwen3-4B-Instruct-2507 教师（已存在的跳过）
-4. 下载 DAPO-Math-17k、AIME24/25、AMC23 并转成 verl parquet
+1. 自动挂载 Google Drive（已挂载则跳过；首次会弹授权窗）
+2. clone/更新 `haha916/opd_test` 仓库
+3. 缺环境/模型/数据时自动 setup：
+   - 创建 `/content/verl_env`（vLLM + verl + 版本 pin + FlashAttention，训练/评测共用）
+   - 下载 Qwen3-0.6B 学生 + Qwen3-4B-Instruct-2507 教师（已存在的跳过）
+   - 下载 DAPO-Math-17k、AIME24/25、AMC23 并转成 verl parquet
+4. 只在学生熵 < 教师熵的位置训练 60 步，保留并评测 step 40 / 60
 
-然后只在学生熵 < 教师熵的位置训练 60 步，保留并评测 step 40 / 60。
-
-- **先跑 Cell 1 挂载 Drive**；权重和评测结果都写 Drive（`/content/drive/MyDrive/outputs`）。
 - 新运行时 setup 约 15–25 分钟（主要是 4B 教师下载和 pip 安装）；之后重跑会跳过。
 - 基线 80 步曲线在 step 40 已进入平台期（23.40–24.38 分，spread 0.97），
   所以只训练 60 步；`OPD_DATA_STEPS=80` 保持与基线相同的数据预算和 prompt 顺序。
 - `SAVE_FREQ=20` + `MAX_ACTOR_CKPT_TO_KEEP=2`：在 20/40/60 保存，最终只留 40、60。
 - 训练完自动评测 `STEPS="60 40"`，结果在
   `/content/drive/MyDrive/outputs/eval/entlt60/report.md` 和 `curve.csv`。
-- 训练完成、只想重跑评测：cell 顶部加 `SKIP_TRAIN=1`；只想训练：`SKIP_EVAL=1`。
+- 训练完成、只想重跑评测：在 cell 顶部加 `os.environ["SKIP_TRAIN"] = "1"`；
+  只想训练：`os.environ["SKIP_EVAL"] = "1"`。
 - 评测断点续跑；训练中途断开只能重跑（训练脚本不支持断点续训）。
 
 掩码和基线 `colab80` 的唯一区别：每个 response 位置先算全词表熵
@@ -325,99 +326,37 @@ H_S = -Σ_v p_S(v) log p_S(v)        H_T = -Σ_v p_T(v) log p_T(v)
 损失按该步被选中位置的总数归一化。日志里看 `opd/entropy_mask_frac`、
 `opd/sample_kl`、`opd/sample_kl_all`。
 
-```bash
-%%bash
-set -uo pipefail
+```python
+# Cell 8 — 一键：挂载 Drive + setup + 训练 60 步 + 评测 40/60
+import os
+import subprocess
 
-REPO=/content/OPSD_OnPolicyDistillation
-REPO_URL=${REPO_URL:-https://github.com/haha916/opd_test.git}
-RUN_ID=${RUN_ID:-entlt60}
-OUTPUT_ROOT=${OUTPUT_ROOT:-/content/drive/MyDrive/outputs}
-SKIP_TRAIN=${SKIP_TRAIN:-0}
-SKIP_EVAL=${SKIP_EVAL:-0}
+REPO = "/content/OPSD_OnPolicyDistillation"
+REPO_URL = "https://github.com/haha916/opd_test.git"
 
-# ---- 0. Drive ----
-[ -d /content/drive/MyDrive ] || {
-  echo "先跑 Cell 1 挂载 Drive："
-  echo "  from google.colab import drive; drive.mount('/content/drive')"
-  exit 1
-}
+# 可选覆盖（按需取消注释）
+# os.environ["SKIP_TRAIN"] = "1"          # 只重跑评测
+# os.environ["SKIP_EVAL"] = "1"           # 只训练
+# os.environ["ENTROPY_MASK_MARGIN"] = "0.05"
+# os.environ["RUN_ID"] = "entlt60-m005"   # 改 tag 时同时改 RUN_ID
 
-# ---- 1. 仓库（新运行时 /content 被清空，先 clone）----
-if [ -d "$REPO/.git" ]; then
-  git -C "$REPO" pull --ff-only || true
-elif [ -d "$REPO" ]; then
-  echo "$REPO 存在但不是 git 仓库，请删除后重试"; exit 1
-else
-  git clone --depth 1 --branch main "$REPO_URL" "$REPO"
-fi
-echo "repo: $(git -C "$REPO" log --oneline -1)"
+# 1) 挂载 Drive（已挂载则跳过；首次会弹授权窗）
+if not os.path.isdir("/content/drive/MyDrive"):
+    from google.colab import drive
+    drive.mount("/content/drive")
 
-# ---- 2. 新运行时：环境 / 模型 / 数据（缺什么补什么）----
-need_setup=0
-[ -x /content/verl_env/bin/python ] || need_setup=1
-[ -f /content/models/Qwen3-0.6B/config.json ] || need_setup=1
-[ -f /content/models/Qwen3-4B-Instruct-2507/config.json ] || need_setup=1
-[ -f /content/data/DAPO-Math-17k/data/dapo-math-17k.parquet ] || need_setup=1
-[ -f /content/data/AIME_2024/test.parquet ] || need_setup=1
-[ -f /content/data/AIME_2025/train.jsonl ] || need_setup=1
-[ -f /content/data/AMC23/test.parquet ] || need_setup=1
+# 2) 仓库
+if not os.path.isdir(os.path.join(REPO, ".git")):
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "--branch", "main", REPO_URL, REPO],
+        check=True,
+    )
+else:
+    subprocess.run(["git", "-C", REPO, "pull", "--ff-only"], check=False)
 
-if [ "$need_setup" = "1" ]; then
-  echo ">>> fresh runtime: 安装 verl 环境 + 下载模型/数据（约 15-25 分钟）"
-  REPO_DIR="$REPO" RUN_PIPELINE=0 bash "$REPO/scripts/colab/bootstrap_colab.sh" || {
-    echo "setup failed"; exit 1;
-  }
-else
-  echo ">>> env / models / data 已存在，跳过 setup"
-fi
-
-for f in /content/verl_env/bin/python \
-         /content/models/Qwen3-0.6B/config.json \
-         /content/models/Qwen3-4B-Instruct-2507/config.json; do
-  [ -e "$f" ] || { echo "缺少 $f"; exit 1; }
-done
-
-# ---- 3. 训练：60 步，只保留 step 40 / 60 ----
-export RUN_ID OUTPUT_ROOT
-export ENTROPY_MASK=lt
-export ENTROPY_MASK_MARGIN=${ENTROPY_MASK_MARGIN:-0.0}
-export TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-60}
-export OPD_DATA_STEPS=${OPD_DATA_STEPS:-80}
-export SAVE_FREQ=${SAVE_FREQ:-20}
-export MAX_ACTOR_CKPT_TO_KEEP=${MAX_ACTOR_CKPT_TO_KEEP:-2}
-
-if [ "$SKIP_TRAIN" != "1" ]; then
-  echo ">>> train: $TOTAL_TRAINING_STEPS steps | data budget $OPD_DATA_STEPS steps | mask lt margin $ENTROPY_MASK_MARGIN"
-  SKIP_EVAL=1 bash "$REPO/scripts/colab/run_qwen3_opd_entropy_lt.sh" || exit $?
-fi
-if [ "$SKIP_EVAL" = "1" ]; then
-  echo "SKIP_EVAL=1, done"
-  exit 0
-fi
-
-# ---- 4. 评测：只评 step 60 / 40 ----
-RUN_DIR=$(find "$OUTPUT_ROOT" -maxdepth 1 -type d -name "*-${RUN_ID}-OPD-*" \
-  -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
-[ -n "${RUN_DIR:-}" ] || { echo "找不到 *-${RUN_ID}-OPD-* 运行目录"; exit 1; }
-echo ">>> eval: $RUN_DIR"
-
-export CKPT_ROOT="$RUN_DIR"
-export EVAL_ROOT="$OUTPUT_ROOT/eval/$RUN_ID"
-export LOCAL_CKPT_ROOT="/content/eval_ckpts/$RUN_ID"
-# 训练环境自带 vLLM；如果之前装过专门的 eval 环境则优先用它
-if [ -z "${PYTHON:-}" ]; then
-  if [ -x /content/eval_env/bin/python ]; then
-    PYTHON=/content/eval_env/bin/python
-  else
-    PYTHON=/content/verl_env/bin/python
-  fi
-fi
-export PYTHON
-
-export STEPS=${STEPS:-"60 40"}
-export EVAL_BASE=${EVAL_BASE:-0}
-export BENCHMARKS=${BENCHMARKS:-"aime24 aime25 amc23"}
-
-bash "$REPO/scripts/colab/eval_qwen3_ckpts.sh"
+# 3) setup（缺什么补什么）+ 训练 60 步 + 评测 step 60/40
+subprocess.run(
+    ["bash", os.path.join(REPO, "scripts/colab/run_entropy_mask_pipeline.sh")],
+    check=True,
+)
 ```
