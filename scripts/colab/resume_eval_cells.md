@@ -1,15 +1,34 @@
-# Colab：Qwen3-0.6B OPD checkpoint 评测（完整流程）
+# Colab：DeepSeek-R1-Distill-Qwen-1.5B ← JustRL-DeepSeek-1.5B
+
+只训练**学生熵 < 教师熵**（`H_S < H_T`）的位置，`lr = 3e-6`。
 
 用法：把下面 cell 依次贴进 Colab notebook 运行。
 
-- Cell 2–5 是安装环境 / 下载模型 / 准备数据，跑完一次即可（新 VM 才需要重跑）。
-- Cell 6 是前台常驻 cell，一次跑 `80 → 40 → 50 → 60 → 70`。只要标签页开着、电脑不睡眠，
-  Colab 就不会判 notebook 空闲而回收 runtime。
-- 结果全部写 Drive；万一还是被断，从 Cell 1 重跑，已完成的 step/benchmark 会自动跳过。
-- `EVAL_ROOT` / `CKPT_ROOT` 用脚本默认值；目录不同就改 Cell 6 顶部两行。
-- Cell 8 是新的**熵方向掩码**实验，并且是**自包含**的：新运行时 `/content`
-  全部丢失也没关系，它会自动挂载 Drive、clone 仓库、安装 verl 环境、下载
-  学生/教师模型和数据，然后训练 60 步并评测 step 40 / 60。
+| 角色 | Colab 路径 | HuggingFace repo |
+|---|---|---|
+| 学生 | `/content/models/student` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
+| 教师 | `/content/models/teacher` | `hbx/JustRL-DeepSeek-1.5B` |
+
+- 如果运行时的 `/workspace/models/models/student`、`/workspace/models/models/teacher`
+  已经存在，脚本会**自动复用**、不再下载；否则下载到 `/content/models/{student,teacher}`。
+  也可以用 `MODEL_PATH` / `TEACHER_MODEL_PATH` 显式指定。
+- **新运行时 `/content` 全部丢失**（代码、venv、模型、数据），只有 Drive 保留。
+  Cell 3 会自动重建环境、重新下载模型和数据；setup 约 15–25 分钟，已存在的项会跳过。
+- 训练：80 步，lr `3e-6`，`ENTROPY_MASK=lt`、margin `0.0`。每个 response 位置先算全词表
+  熵 `H_S`、`H_T`，只保留 `H_S < H_T` 的位置做 sampled-token reverse KL；掩码每一步按
+  当前学生重算，损失按该步选中位置总数归一化。日志里看 `opd/entropy_mask_frac`、
+  `opd/sample_kl`、`opd/sample_kl_all`。
+- batch 按 GPU 自动选：A100 80G→64，A100 40G→16，L4 24G→8。
+- 每 10 步存一次，只留最后 5 个（step 40/50/60/70/80）；训练完自动评测
+  step_000 + 40/50/60/70/80。
+- 评测：aime24 / aime25 / amc23，n=4，32k，`T=0.6, top_p=0.95`，**base student
+  tokenizer**（避免 checkpoint 自带的新 chat template 改变 prompt token）。
+- 结果目录：`/content/drive/MyDrive/outputs/eval/ds15b-entlt-lr3e6/`
+  （`report.md`、`curve.csv`、每个 step 的 `*_summary.json`）。
+- 训练日志：`/content/drive/MyDrive/outputs/logs/colab_deepseek_opd_*.log`。
+- 训练中断只能重跑；**评测**中断可以从 Cell 1 重跑后直接跑 Cell 4 续评。
+- Colab 里用官方 `huggingface.co`，**不需要镜像**。本地（AutoDL 等）测试下载时可用
+  `HF_ENDPOINT=https://hf-mirror.com`。
 
 ---
 
@@ -39,248 +58,68 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 ---
 
-## Cell 3 — 安装评测环境（vLLM + 依赖 pin + FlashAttention-2）
+## Cell 3 — 一键：环境/数据/模型准备 + 训练 80 步 + 评测
+
+首次（或新运行时）会自动完成：
+
+1. 创建 `/content/verl_env`（vLLM + verl + 版本 pin + FlashAttention）
+2. 下载 `DeepSeek-R1-Distill-Qwen-1.5B` + `JustRL-DeepSeek-1.5B`
+3. 下载 DAPO-Math-17k（去重）、AIME24/25、AMC23 并转成 verl parquet
+4. 只训练 `H_S < H_T` 的位置 80 步，lr 3e-6
+5. 评测 step_000 / 40 / 50 / 60 / 70 / 80
+
+可选覆盖（按需取消注释）：
 
 ```bash
-%%bash
-set -euo pipefail
-VENV_DIR=/content/eval_env
-
-if [ ! -x "$VENV_DIR/bin/python" ]; then
-  pip install -q uv
-  uv venv --seed "$VENV_DIR" --python 3.12
-fi
-source "$VENV_DIR/bin/activate"
-
-if [ ! -f "$VENV_DIR/.eval_ready" ]; then
-  echo "installing vLLM (torch 2.9.0+cu128) ..."
-  pip install -q "vllm==0.12.0"
-  touch "$VENV_DIR/.eval_ready"
-fi
-
-# vLLM/transformers 在本仓库验证过的版本组合；每次跑都强制 pin，防止依赖漂移
-pip install -q \
-  "torch==2.9.0" \
-  "transformers==4.57.1" \
-  "datasets==5.0.1" \
-  "pyarrow==21.0.0" \
-  "numpy==1.26.4" \
-  "scipy==1.16.3" \
-  "opencv-python-headless==4.11.0.86" \
-  "cupy-cuda12x==13.6.0" \
-  "pandas" \
-  "huggingface_hub"
-
-"$VENV_DIR/bin/python" -c "import vllm, transformers, datasets, torch, scipy, numpy; print('vllm', vllm.__version__, '| torch', torch.__version__, '| scipy', scipy.__version__, '| numpy', numpy.__version__)"
-
-# FlashAttention-2 预编译 wheel（cp312 / torch 2.9 / cu128）。
-# vLLM 自带 attention kernel，不装也能评测；装上供 transformers / 之后的训练路径使用。
-# 装不上不阻塞评测，回退到 vLLM 自带 backend / SDPA。
-if ! "$VENV_DIR/bin/python" -c "import flash_attn" >/dev/null 2>&1; then
-  FA_WHEEL="https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu128torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl"
-  if pip install -q "$FA_WHEEL"; then
-    "$VENV_DIR/bin/python" -c "import flash_attn; print('flash_attn', flash_attn.__version__)"
-  else
-    echo "WARNING: flash-attn 安装失败，评测继续用 vLLM 自带 backend / SDPA"
-  fi
-else
-  "$VENV_DIR/bin/python" -c "import flash_attn; print('flash_attn already installed', flash_attn.__version__)"
-fi
+# export RUN_ID=ds15b-entlt-lr3e6
+# export TOTAL_TRAINING_STEPS=80
+# export ENTROPY_MASK_MARGIN=0.05
+# export MODEL_PATH=/workspace/models/models/student
+# export TEACHER_MODEL_PATH=/workspace/models/models/teacher
+# export SKIP_EVAL=1        # 只训练
+# export SKIP_TRAIN=1       # 只评测
 ```
-
----
-
-## Cell 4 — 下载 Qwen3-0.6B 学生模型
-
-```bash
-%%bash
-set -euo pipefail
-MODEL_PATH=/content/models/Qwen3-0.6B
-
-if [ -f "$MODEL_PATH/config.json" ]; then
-  echo "student exists: $MODEL_PATH"
-else
-  /content/eval_env/bin/python - "$MODEL_PATH" <<'PY'
-import sys
-from pathlib import Path
-from huggingface_hub import snapshot_download
-
-local_dir = Path(sys.argv[1])
-local_dir.mkdir(parents=True, exist_ok=True)
-print(f"[download] Qwen/Qwen3-0.6B -> {local_dir}")
-snapshot_download(
-    repo_id="Qwen/Qwen3-0.6B",
-    local_dir=str(local_dir),
-    ignore_patterns=["*.bin", "*.pth", "original/*", "*.gguf"],
-)
-print("[done]")
-PY
-fi
-
-[ -f "$MODEL_PATH/config.json" ]
-```
-
----
-
-## Cell 5 — 下载并准备评测数据（aime24 / aime25 / amc23）
-
-如果以后要评 math500，把 `BENCHMARKS` 改成 `"math500 aime24 aime25 amc23"`（Cell 6 也要同步）。
-
-```bash
-%%bash
-set -euo pipefail
-REPO_DIR=/content/OPSD_OnPolicyDistillation
-DATA_DIR=/content/data
-DATA_PROCESSED=/content/data/grpo_processed
-BENCHMARKS="aime24 aime25 amc23"
-
-/content/eval_env/bin/python - "$DATA_DIR" "$DATA_PROCESSED" "$REPO_DIR" "$BENCHMARKS" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-import pandas as pd
-from datasets import load_dataset
-
-data_dir = Path(sys.argv[1])
-processed = Path(sys.argv[2])
-repo_dir = Path(sys.argv[3])
-benchmarks = sys.argv[4].split()
-data_dir.mkdir(parents=True, exist_ok=True)
-
-
-def write_jsonl(path, rows):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    print(f"wrote {path} ({len(rows)} rows)")
-
-
-def write_parquet(path, rows):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows).to_parquet(path)
-    print(f"wrote {path} ({len(rows)} rows)")
-
-
-need = set(benchmarks)
-
-if "math500" in need and not (data_dir / "MATH-500" / "test.jsonl").exists():
-    ds = load_dataset("HuggingFaceH4/MATH-500", split="test")
-    write_jsonl(
-        data_dir / "MATH-500" / "test.jsonl",
-        [{"problem": r["problem"], "answer": r["answer"]} for r in ds],
-    )
-
-if "aime24" in need and not (data_dir / "AIME_2024" / "test.parquet").exists():
-    ds = load_dataset("Maxwell-Jia/AIME_2024", split="train")
-    write_parquet(
-        data_dir / "AIME_2024" / "test.parquet",
-        [{"Problem": r["Problem"], "Answer": r["Answer"], "Solution": r.get("Solution", "")} for r in ds],
-    )
-
-if "aime25" in need and not (data_dir / "AIME_2025" / "train.jsonl").exists():
-    try:
-        ds = load_dataset("MathArena/aime_2025", split="train")
-        rows = [{"problem": r["problem"], "answer": r["answer"]} for r in ds]
-    except Exception as exc:  # noqa: BLE001
-        print("MathArena/aime_2025 failed, fallback yentinglin/aime_2025:", exc)
-        ds = load_dataset("yentinglin/aime_2025", split="train")
-        rows = [{"problem": r["problem"], "answer": r["answer"]} for r in ds]
-    write_jsonl(data_dir / "AIME_2025" / "train.jsonl", rows)
-
-if "amc23" in need and not (data_dir / "AMC23" / "test.parquet").exists():
-    ds = load_dataset("AI-MO/aimo-validation-amc", split="train")
-    rows = [
-        {"problem": r["problem"], "answer": r["answer"]}
-        for r in ds
-        if "2023" in str(r.get("url", ""))
-    ]
-    if not rows:
-        rows = [{"problem": r["problem"], "answer": r["answer"]} for r in ds]
-    write_parquet(data_dir / "AMC23" / "test.parquet", rows)
-
-# 转成 verl 评测格式
-sys.path.insert(0, str(repo_dir / "src" / "data"))
-from benchmark_utils import load_benchmark  # noqa: E402
-
-processed.mkdir(parents=True, exist_ok=True)
-for name in benchmarks:
-    out = processed / f"val_{name}.parquet"
-    if out.exists():
-        print(f"[skip] {out}")
-        continue
-    ds = load_benchmark(name, str(data_dir))
-    ds.to_parquet(str(out))
-    print(f"wrote {out} ({len(ds)} rows)")
-PY
-```
-
----
-
-## Cell 6 — 常驻前台，顺序续跑全部 checkpoint
-
-- `STEPS="80 40 50 60 70"`：80 先跑（只差 aime25/amc23），然后 40–70。
-- `EVAL_BASE=0`：step_000 已经评测完，跳过。
-- 不要改 `BENCHMARKS`，保持默认 `aime24 aime25 amc23`；否则 `all_summary.json` 会缺项。
-- 循环最多重试 3 次：进程级崩溃（如 CUDA OOM）会自动续跑；VM 被删除则 cell 一起消失，重贴即可。
 
 ```bash
 %%bash
 set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
 
-# 目录不对就改这两行
-EVAL_ROOT=${EVAL_ROOT:-/content/drive/MyDrive/outputs/eval/colab_qwen3_0.6b}
-CKPT_ROOT=${CKPT_ROOT:-/content/drive/MyDrive/outputs}
-export EVAL_ROOT CKPT_ROOT
-
-export REPO=/content/OPSD_OnPolicyDistillation
-export PYTHON=/content/eval_env/bin/python
-export MODEL_PATH=/content/models/Qwen3-0.6B
-export TOKENIZER_PATH=/content/models/Qwen3-0.6B
-export DATA_DIR=/content/data
-export DATA_PROCESSED=/content/data/grpo_processed
-
-STEPS=${STEPS:-"80 40 50 60 70"}
-export STEPS EVAL_BASE=0
-
-[ -x "$PYTHON" ] || { echo "先跑 Cell 3 安装环境"; exit 1; }
-[ -f "$DATA_PROCESSED/val_aime24.parquet" ] || { echo "先跑 Cell 5 准备数据"; exit 1; }
-
-LOG_DIR="$EVAL_ROOT/logs"
-mkdir -p "$LOG_DIR"
-LOG="$LOG_DIR/resume_$(date +%m%d_%H%M).log"
-echo "log -> $LOG"
-
-want=$(echo "$STEPS" | wc -w)
-for attempt in 1 2 3; do
-  echo "=== attempt $attempt/3 ($(date)) ===" | tee -a "$LOG"
-  bash "$REPO/scripts/colab/eval_qwen3_ckpts.sh" 2>&1 | tee -a "$LOG"
-
-  got=0
-  for s in $STEPS; do
-    tag=$(printf 'step_%03d' "$((10#$s))")
-    [ -f "$EVAL_ROOT/$tag/all_summary.json" ] && got=$((got + 1))
-  done
-  echo "=== attempt $attempt done: $got/$want checkpoints complete ===" | tee -a "$LOG"
-
-  [ "$got" -ge "$want" ] && break
-  sleep 20
-done
-
-echo
-echo "curve : $EVAL_ROOT/curve.csv"
-echo "report: $EVAL_ROOT/report.md"
-[ -f "$EVAL_ROOT/curve.csv" ] && cat "$EVAL_ROOT/curve.csv"
+bash "$REPO/scripts/colab/run_deepseek_entropy_pipeline.sh"
 ```
 
 ---
 
-## Cell 7 — 查看进度（可选，随时可跑）
+## Cell 4 — 只重跑评测（新运行时可续）
+
+checkpoint 在 Drive 里，新运行时只需 Cell 1–3 的 setup（Cell 3 会自动跳过已完成项），
+然后跑这个 cell。已完成的 benchmark 会自动跳过。
 
 ```bash
 %%bash
-EVAL_ROOT=${EVAL_ROOT:-/content/drive/MyDrive/outputs/eval/colab_qwen3_0.6b}
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+export SKIP_TRAIN=1
+bash "$REPO/scripts/colab/run_deepseek_entropy_pipeline.sh"
+```
+
+---
+
+## Cell 5 — 查看进度（可选，随时可跑）
+
+```bash
+%%bash
+RUN_ID=${RUN_ID:-ds15b-entlt-lr3e6}
+EVAL_ROOT=${EVAL_ROOT:-/content/drive/MyDrive/outputs/eval/$RUN_ID}
+
+echo "== checkpoints =="
+RUN_DIR=$(find /content/drive/MyDrive/outputs -maxdepth 1 -type d \
+  -name "*-${RUN_ID}-OPD-*" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+echo "${RUN_DIR:-<none>}"
+[ -n "${RUN_DIR:-}" ] && ls "$RUN_DIR"/global_step_*/actor/huggingface/config.json 2>/dev/null
+
+echo
+echo "== eval =="
 for d in "$EVAL_ROOT"/step_*; do
   [ -d "$d" ] || continue
   printf '%-10s ' "$(basename "$d")"
@@ -288,75 +127,45 @@ for d in "$EVAL_ROOT"/step_*; do
   [ -f "$d/all_summary.json" ] && printf '[COMPLETE]'
   echo
 done
+[ -f "$EVAL_ROOT/curve.csv" ] && cat "$EVAL_ROOT/curve.csv"
 ```
 
 ---
 
-## Cell 8 — 一键：挂载 Drive + 环境/数据准备 + 训练 60 步 + 评测 40 / 60
+## Cell 6 — 可选：只准备环境（调试用）
 
-Colab 删除运行时后 `/content` 全部丢失（代码、venv、模型、数据），只有 Drive
-保留。这个 Python cell 是**自包含**的：
+一键 cell 失败时，可以先单独确认环境/模型/数据是否就绪。这条不会训练。
 
-1. 自动挂载 Google Drive（已挂载则跳过；首次会弹授权窗）
-2. clone/更新 `haha916/opd_test` 仓库
-3. 缺环境/模型/数据时自动 setup：
-   - 创建 `/content/verl_env`（vLLM + verl + 版本 pin + FlashAttention，训练/评测共用）
-   - 下载 Qwen3-0.6B 学生 + Qwen3-4B-Instruct-2507 教师（已存在的跳过）
-   - 下载 DAPO-Math-17k、AIME24/25、AMC23 并转成 verl parquet
-4. 只在学生熵 < 教师熵的位置训练 60 步，保留并评测 step 40 / 60
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
 
-- 新运行时 setup 约 15–25 分钟（主要是 4B 教师下载和 pip 安装）；之后重跑会跳过。
-- 基线 80 步曲线在 step 40 已进入平台期（23.40–24.38 分，spread 0.97），
-  所以只训练 60 步；`OPD_DATA_STEPS=80` 保持与基线相同的数据预算和 prompt 顺序。
-- `SAVE_FREQ=20` + `MAX_ACTOR_CKPT_TO_KEEP=2`：在 20/40/60 保存，最终只留 40、60。
-- 训练完自动评测 `STEPS="60 40"`，结果在
-  `/content/drive/MyDrive/outputs/eval/entlt60/report.md` 和 `curve.csv`。
-- 训练完成、只想重跑评测：在 cell 顶部加 `os.environ["SKIP_TRAIN"] = "1"`；
-  只想训练：`os.environ["SKIP_EVAL"] = "1"`。
-- 评测断点续跑；训练中途断开只能重跑（训练脚本不支持断点续训）。
+# 环境 + 数据（不下载 Qwen3 模型、不启动训练）
+REPO_DIR="$REPO" RUN_PIPELINE=0 DOWNLOAD_MODELS=0 \
+  bash "$REPO/scripts/colab/bootstrap_colab.sh"
 
-掩码和基线 `colab80` 的唯一区别：每个 response 位置先算全词表熵
-
-```
-H_S = -Σ_v p_S(v) log p_S(v)        H_T = -Σ_v p_T(v) log p_T(v)
+# DeepSeek 学生 / JustRL 教师
+PYTHON=/content/verl_env/bin/python \
+  bash "$REPO/scripts/utils/download_deepseek_models.sh"
 ```
 
-只保留 `H_S < H_T - ENTROPY_MASK_MARGIN` 的位置（direction=`lt`，学生比教师
-更尖），在这些位置上做 sampled-token reverse KL；掩码每一步按当前学生重算，
-损失按该步被选中位置的总数归一化。日志里看 `opd/entropy_mask_frac`、
-`opd/sample_kl`、`opd/sample_kl_all`。
+---
 
-```python
-# Cell 8 — 一键：挂载 Drive + setup + 训练 60 步 + 评测 40/60
-import os
-import subprocess
+## Cell 7 — 可选：2 步 smoke test（验证 mask）
 
-REPO = "/content/OPSD_OnPolicyDistillation"
-REPO_URL = "https://github.com/haha916/opd_test.git"
+只训练 2 步、只留 1 个 checkpoint，不评测。日志里确认
+`opd/entropy_mask_frac` 在 0 和 1 之间、`opd/sample_kl_all` 正常。
 
-# 可选覆盖（按需取消注释）
-# os.environ["SKIP_TRAIN"] = "1"          # 只重跑评测
-# os.environ["SKIP_EVAL"] = "1"           # 只训练
-# os.environ["ENTROPY_MASK_MARGIN"] = "0.05"
-# os.environ["RUN_ID"] = "entlt60-m005"   # 改 tag 时同时改 RUN_ID
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+export SKIP_EVAL=1
+export RUN_ID=ds15b-smoke
+export TOTAL_TRAINING_STEPS=2
+export SAVE_FREQ=1
+export MAX_ACTOR_CKPT_TO_KEEP=1
 
-# 1) 挂载 Drive（已挂载则跳过；首次会弹授权窗）
-if not os.path.isdir("/content/drive/MyDrive"):
-    from google.colab import drive
-    drive.mount("/content/drive")
-
-# 2) 仓库
-if not os.path.isdir(os.path.join(REPO, ".git")):
-    subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", "main", REPO_URL, REPO],
-        check=True,
-    )
-else:
-    subprocess.run(["git", "-C", REPO, "pull", "--ff-only"], check=False)
-
-# 3) setup（缺什么补什么）+ 训练 60 步 + 评测 step 60/40
-subprocess.run(
-    ["bash", os.path.join(REPO, "scripts/colab/run_entropy_mask_pipeline.sh")],
-    check=True,
-)
+bash "$REPO/scripts/colab/run_deepseek_entropy_pipeline.sh"
 ```

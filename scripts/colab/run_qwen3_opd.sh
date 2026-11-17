@@ -143,11 +143,12 @@ LIMIT_PROMPTS=${LIMIT_PROMPTS:-0}
 EVAL_BASE=${EVAL_BASE:-1}
 
 LOG_DIR="${OUTPUT_ROOT}/logs"
+LOG_PREFIX=${LOG_PREFIX:-colab_qwen3_opd}
 mkdir -p "$LOG_DIR"
-LOG_FILE="${LOG_DIR}/colab_qwen3_opd_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="${LOG_DIR}/${LOG_PREFIX}_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-echo "=== Colab Qwen3 sampled-token OPD ==="
+echo "=== ${OPD_RUN_TITLE:-Colab Qwen3 sampled-token OPD} ==="
 date
 echo "log      : $LOG_FILE"
 echo "student  : $MODEL_PATH"
