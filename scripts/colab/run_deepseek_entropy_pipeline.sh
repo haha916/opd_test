@@ -14,9 +14,9 @@
 # and nothing is downloaded. Only Google Drive (outputs/checkpoints) persists
 # across runtimes.
 #
-# Training: 80 steps, 10-step checkpoints, ring buffer keeps the last 5
-# (step 40/50/60/70/80). Evaluation runs step_000 plus those checkpoints on
-# aime24/aime25/amc23 (n=4, 32k, T=0.6, top_p=0.95).
+# Training: 60 steps, 20-step saves, ring buffer keeps only step 40/60.
+# Evaluation runs step 40 and step 60 on aime24/aime25/amc23
+# (n=4, 32k, T=0.6, top_p=0.95); step_000 is skipped.
 #
 # Usage:
 #   bash scripts/colab/run_deepseek_entropy_pipeline.sh
@@ -26,7 +26,7 @@
 # Overrides:
 #   RUN_ID=ds15b-entlt-lr3e6   OUTPUT_ROOT=/content/drive/MyDrive/outputs
 #   MODEL_PATH=... TEACHER_MODEL_PATH=...
-#   ENTROPY_MASK_MARGIN=0.05   TOTAL_TRAINING_STEPS=80   LEARNING_RATE=3e-6
+#   ENTROPY_MASK_MARGIN=0.05   TOTAL_TRAINING_STEPS=60   LEARNING_RATE=3e-6
 #   HF_ENDPOINT=https://hf-mirror.com   # only outside Colab
 set -uo pipefail
 

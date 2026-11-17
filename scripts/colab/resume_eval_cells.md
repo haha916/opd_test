@@ -14,13 +14,13 @@
   也可以用 `MODEL_PATH` / `TEACHER_MODEL_PATH` 显式指定。
 - **新运行时 `/content` 全部丢失**（代码、venv、模型、数据），只有 Drive 保留。
   Cell 3 会自动重建环境、重新下载模型和数据；setup 约 15–25 分钟，已存在的项会跳过。
-- 训练：80 步，lr `3e-6`，`ENTROPY_MASK=lt`、margin `0.0`。每个 response 位置先算全词表
-  熵 `H_S`、`H_T`，只保留 `H_S < H_T` 的位置做 sampled-token reverse KL；掩码每一步按
-  当前学生重算，损失按该步选中位置总数归一化。日志里看 `opd/entropy_mask_frac`、
+- 训练：**60 步**，lr `3e-6`，`ENTROPY_MASK=lt`、margin `0.0`。每个 response 位置先算
+  全词表熵 `H_S`、`H_T`，只保留 `H_S < H_T` 的位置做 sampled-token reverse KL；掩码每
+  一步按当前学生重算，损失按该步选中位置总数归一化。日志里看 `opd/entropy_mask_frac`、
   `opd/sample_kl`、`opd/sample_kl_all`。
 - batch 按 GPU 自动选：A100 80G→64，A100 40G→16，L4 24G→8。
-- 每 10 步存一次，只留最后 5 个（step 40/50/60/70/80）；训练完自动评测
-  step_000 + 40/50/60/70/80。
+- 每 20 步存一次，只留最后 2 个（**step 40 / 60**）；训练完只评测 step 40 / 60
+  （不评 step_000；需要基线时设 `EVAL_BASE=1`）。
 - 评测：aime24 / aime25 / amc23，n=4，32k，`T=0.6, top_p=0.95`，**base student
   tokenizer**（避免 checkpoint 自带的新 chat template 改变 prompt token）。
 - 结果目录：`/content/drive/MyDrive/outputs/eval/ds15b-entlt-lr3e6/`
@@ -58,21 +58,21 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 ---
 
-## Cell 3 — 一键：环境/数据/模型准备 + 训练 80 步 + 评测
+## Cell 3 — 一键：环境/数据/模型准备 + 训练 60 步 + 评测
 
 首次（或新运行时）会自动完成：
 
 1. 创建 `/content/verl_env`（vLLM + verl + 版本 pin + FlashAttention）
 2. 下载 `DeepSeek-R1-Distill-Qwen-1.5B` + `JustRL-DeepSeek-1.5B`
 3. 下载 DAPO-Math-17k（去重）、AIME24/25、AMC23 并转成 verl parquet
-4. 只训练 `H_S < H_T` 的位置 80 步，lr 3e-6
-5. 评测 step_000 / 40 / 50 / 60 / 70 / 80
+4. 只训练 `H_S < H_T` 的位置 60 步，lr 3e-6
+5. 评测 step 40 / 60
 
 可选覆盖（按需取消注释）：
 
 ```bash
 # export RUN_ID=ds15b-entlt-lr3e6
-# export TOTAL_TRAINING_STEPS=80
+# export TOTAL_TRAINING_STEPS=60
 # export ENTROPY_MASK_MARGIN=0.05
 # export MODEL_PATH=/workspace/models/models/student
 # export TEACHER_MODEL_PATH=/workspace/models/models/teacher

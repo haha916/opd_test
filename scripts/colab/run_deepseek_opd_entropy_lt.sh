@@ -19,7 +19,7 @@
 #
 # Overrides:
 #   RUN_ID=ds15b-entlt-lr3e6  LEARNING_RATE=3e-6
-#   ENTROPY_MASK_MARGIN=0.05  TOTAL_TRAINING_STEPS=80
+#   ENTROPY_MASK_MARGIN=0.05  TOTAL_TRAINING_STEPS=60
 #   MODEL_PATH=/workspace/models/models/student
 #   TEACHER_MODEL_PATH=/workspace/models/models/teacher
 #   OUTPUT_ROOT=/content/drive/MyDrive/outputs
@@ -56,19 +56,21 @@ export ENTROPY_MASK_MARGIN=${ENTROPY_MASK_MARGIN:-0.0}
 # templates and is ignored by the shared DeepSeek tokenizer.
 export ENABLE_THINKING=${ENABLE_THINKING:-False}
 
-# 80 optimizer steps x 64 prompts = the historical DeepSeek OPD budget.
-export TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-80}
+# 60 optimizer steps, saving every 20 steps. The checkpoint ring buffer keeps
+# only the last 2 -> step 40 and step 60. OPD_DATA_STEPS=80 keeps the prompt
+# budget/order identical to the 80-step baseline; the arm just stops earlier.
+export TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-60}
 export OPD_DATA_STEPS=${OPD_DATA_STEPS:-80}
-export SAVE_FREQ=${SAVE_FREQ:-10}
-export MAX_ACTOR_CKPT_TO_KEEP=${MAX_ACTOR_CKPT_TO_KEEP:-5}
+export SAVE_FREQ=${SAVE_FREQ:-20}
+export MAX_ACTOR_CKPT_TO_KEEP=${MAX_ACTOR_CKPT_TO_KEEP:-2}
 export PLATEAU_ENABLE=${PLATEAU_ENABLE:-False}
 export TEST_FREQ=${TEST_FREQ:--1}
 
 # DeepSeek-R1 / JustRL evaluation recipe: T=0.6, top_p=0.95, 32k.
 # The base student tokenizer is passed by run_qwen3_opd.sh (--tokenizer-path),
 # so checkpoints with a newer chat template are still prompted exactly as in
-# training.
-export EVAL_BASE=${EVAL_BASE:-1}
+# training. Evaluate only the kept checkpoints (step 40 / 60), not step_000.
+export EVAL_BASE=${EVAL_BASE:-0}
 export EVAL_N=${EVAL_N:-4}
 export EVAL_MAX_TOKENS=${EVAL_MAX_TOKENS:-32768}
 export EVAL_MAX_MODEL_LEN=${EVAL_MAX_MODEL_LEN:-34000}
