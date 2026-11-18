@@ -1,31 +1,38 @@
-# Colab：DeepSeek-R1-Distill-Qwen-1.5B ← JustRL-DeepSeek-1.5B
+# Colab：Qwen3-1.7B ← Qwen3-4B-Instruct-2507（EOPD，lr = 3e-6）
 
-只训练**学生熵 < 教师熵**（`H_S < H_T`）的位置，`lr = 3e-6`。
+EOPD（entropy-aware on-policy distillation，Jin et al., 2026，arXiv:2603.07079）：
+
+```
+L = PPO-clipped sampled reverse KL（所有采样位置）
+    + 1[H_T > tau] * forward KL（教师 top-k token，只在教师高熵位置）
+```
 
 用法：把下面 cell 依次贴进 Colab notebook 运行。
 
 | 角色 | Colab 路径 | HuggingFace repo |
 |---|---|---|
-| 学生 | `/content/models/student` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
-| 教师 | `/content/models/teacher` | `hbx/JustRL-DeepSeek-1.5B` |
+| 学生 | `/content/models/Qwen3-1.7B` | `Qwen/Qwen3-1.7B` |
+| 教师 | `/content/models/Qwen3-4B-Instruct-2507` | `Qwen/Qwen3-4B-Instruct-2507` |
 
-- 如果运行时的 `/workspace/models/models/student`、`/workspace/models/models/teacher`
-  已经存在，脚本会**自动复用**、不再下载；否则下载到 `/content/models/{student,teacher}`。
-  也可以用 `MODEL_PATH` / `TEACHER_MODEL_PATH` 显式指定。
+- 学生**不开 thinking**（`ENABLE_THINKING=False`）。
+- 如果运行时的 `/workspace/models/models/Qwen3-1.7B`、
+  `/workspace/models/models/Qwen3-4B-Instruct-2507` 已经存在，脚本会**自动复用**、
+  不再下载；否则下载到 `/content/models/` 下。也可以用 `MODEL_PATH` /
+  `TEACHER_MODEL_PATH` 显式指定。
 - **新运行时 `/content` 全部丢失**（代码、venv、模型、数据），只有 Drive 保留。
   Cell 3 会自动重建环境、重新下载模型和数据；setup 约 15–25 分钟，已存在的项会跳过。
-- 训练：**60 步**，lr `3e-6`，`ENTROPY_MASK=lt`、margin `0.0`。每个 response 位置先算
-  全词表熵 `H_S`、`H_T`，只保留 `H_S < H_T` 的位置做 sampled-token reverse KL；掩码每
-  一步按当前学生重算，损失按该步选中位置总数归一化。日志里看 `opd/entropy_mask_frac`、
-  `opd/sample_kl`、`opd/sample_kl_all`。
+- 训练：**80 步**，lr `3e-6`，每 10 步保存一次，只留最后 5 个
+  （**step 40/50/60/70/80**）；训练完**只评测这 5 个** checkpoint。
+- EOPD 默认参数：`tau=0.8`（教师熵阈值）、`topk=16`、`clip_epsilon=0.2`、
+  `n_ppo_epochs=1`（每个训练步一次优化器更新；论文默认 4，可用
+  `EOPD_N_PPO_EPOCHS=4` 覆盖）。日志里看 `opd/eopd_rkl_loss`、
+  `opd/eopd_fkl_loss`、`opd/eopd_high_entropy_fraction`、`opd/eopd_clip_fraction`。
 - batch 按 GPU 自动选：A100 80G→64，A100 40G→16，L4 24G→8。
-- 每 20 步存一次，只留最后 2 个（**step 40 / 60**）；训练完只评测 step 40 / 60
-  （不评 step_000；需要基线时设 `EVAL_BASE=1`）。
-- 评测：aime24 / aime25 / amc23，n=4，32k，`T=0.6, top_p=0.95`，**base student
-  tokenizer**（避免 checkpoint 自带的新 chat template 改变 prompt token）。
-- 结果目录：`/content/drive/MyDrive/outputs/eval/ds15b-entlt-lr3e6/`
+- 评测：aime24 / aime25 / amc23，n=4，32k，**`T=1.0, top_p=1.0, top_k=-1`**，
+  **base student tokenizer**（避免 checkpoint 自带的新 chat template 改变 prompt token）。
+- 结果目录：`/content/drive/MyDrive/outputs/eval/qwen3-1.7b-eopd-lr3e6/`
   （`report.md`、`curve.csv`、每个 step 的 `*_summary.json`）。
-- 训练日志：`/content/drive/MyDrive/outputs/logs/colab_deepseek_opd_*.log`。
+- 训练日志：`/content/drive/MyDrive/outputs/logs/colab_qwen3_eopd_*.log`。
 - 训练中断只能重跑；**评测**中断可以从 Cell 1 重跑后直接跑 Cell 4 续评。
 - Colab 里用官方 `huggingface.co`，**不需要镜像**。本地（AutoDL 等）测试下载时可用
   `HF_ENDPOINT=https://hf-mirror.com`。
@@ -58,24 +65,27 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 ---
 
-## Cell 3 — 一键：环境/数据/模型准备 + 训练 60 步 + 评测
+## Cell 3 — 一键：环境/数据/模型准备 + EOPD 训练 80 步 + 评测 40–80
 
 首次（或新运行时）会自动完成：
 
 1. 创建 `/content/verl_env`（vLLM + verl + 版本 pin + FlashAttention）
-2. 下载 `DeepSeek-R1-Distill-Qwen-1.5B` + `JustRL-DeepSeek-1.5B`
+2. 下载 `Qwen3-1.7B` + `Qwen3-4B-Instruct-2507`
 3. 下载 DAPO-Math-17k（去重）、AIME24/25、AMC23 并转成 verl parquet
-4. 只训练 `H_S < H_T` 的位置 60 步，lr 3e-6
-5. 评测 step 40 / 60
+4. EOPD 训练 80 步，lr 3e-6（第 40/50/60/70/80 步保存）
+5. 评测 step 40 / 50 / 60 / 70 / 80（T=1.0，top_p=1.0，top_k=-1）
 
 可选覆盖（按需取消注释）：
 
 ```bash
-# export RUN_ID=ds15b-entlt-lr3e6
-# export TOTAL_TRAINING_STEPS=60
-# export ENTROPY_MASK_MARGIN=0.05
-# export MODEL_PATH=/workspace/models/models/student
-# export TEACHER_MODEL_PATH=/workspace/models/models/teacher
+# export RUN_ID=qwen3-1.7b-eopd-lr3e6
+# export TOTAL_TRAINING_STEPS=80
+# export EOPD_TAU=0.8
+# export EOPD_TOPK=16
+# export EOPD_CLIP_EPSILON=0.2
+# export EOPD_N_PPO_EPOCHS=1
+# export MODEL_PATH=/workspace/models/models/Qwen3-1.7B
+# export TEACHER_MODEL_PATH=/workspace/models/models/Qwen3-4B-Instruct-2507
 # export SKIP_EVAL=1        # 只训练
 # export SKIP_TRAIN=1       # 只评测
 ```
@@ -85,7 +95,7 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 
-bash "$REPO/scripts/colab/run_deepseek_entropy_pipeline.sh"
+bash "$REPO/scripts/colab/run_qwen3_eopd_pipeline.sh"
 ```
 
 ---
@@ -100,7 +110,7 @@ checkpoint 在 Drive 里，新运行时只需 Cell 1–3 的 setup（Cell 3 会�
 set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 export SKIP_TRAIN=1
-bash "$REPO/scripts/colab/run_deepseek_entropy_pipeline.sh"
+bash "$REPO/scripts/colab/run_qwen3_eopd_pipeline.sh"
 ```
 
 ---
@@ -109,7 +119,7 @@ bash "$REPO/scripts/colab/run_deepseek_entropy_pipeline.sh"
 
 ```bash
 %%bash
-RUN_ID=${RUN_ID:-ds15b-entlt-lr3e6}
+RUN_ID=${RUN_ID:-qwen3-1.7b-eopd-lr3e6}
 EVAL_ROOT=${EVAL_ROOT:-/content/drive/MyDrive/outputs/eval/$RUN_ID}
 
 echo "== checkpoints =="
@@ -141,31 +151,34 @@ done
 set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 
-# 环境 + 数据（不下载 Qwen3 模型、不启动训练）
+# 环境 + 数据（不下载模型、不启动训练）
 REPO_DIR="$REPO" RUN_PIPELINE=0 DOWNLOAD_MODELS=0 \
   bash "$REPO/scripts/colab/bootstrap_colab.sh"
 
-# DeepSeek 学生 / JustRL 教师
+# Qwen3-1.7B 学生 / Qwen3-4B-Instruct-2507 教师
 PYTHON=/content/verl_env/bin/python \
-  bash "$REPO/scripts/utils/download_deepseek_models.sh"
+  STUDENT_ID=Qwen/Qwen3-1.7B \
+  TEACHER_ID=Qwen/Qwen3-4B-Instruct-2507 \
+  bash "$REPO/scripts/utils/download_qwen3_models.sh"
 ```
 
 ---
 
-## Cell 7 — 可选：2 步 smoke test（验证 mask）
+## Cell 7 — 可选：2 步 smoke test（验证 EOPD loss）
 
 只训练 2 步、只留 1 个 checkpoint，不评测。日志里确认
-`opd/entropy_mask_frac` 在 0 和 1 之间、`opd/sample_kl_all` 正常。
+`opd/eopd_rkl_loss`、`opd/eopd_fkl_loss` 都是有限值，
+`opd/eopd_high_entropy_fraction` 在 0 和 1 之间。
 
 ```bash
 %%bash
 set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 export SKIP_EVAL=1
-export RUN_ID=ds15b-smoke
+export RUN_ID=qwen3-eopd-smoke
 export TOTAL_TRAINING_STEPS=2
 export SAVE_FREQ=1
 export MAX_ACTOR_CKPT_TO_KEEP=1
 
-bash "$REPO/scripts/colab/run_deepseek_entropy_pipeline.sh"
+bash "$REPO/scripts/colab/run_qwen3_eopd_pipeline.sh"
 ```

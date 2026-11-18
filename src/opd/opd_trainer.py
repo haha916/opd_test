@@ -90,6 +90,13 @@ class OPDTrainer(RayPPOTrainer):
         self.sample_clip = opd_cfg.get("sample_clip", None)
         if self.sample_clip is not None and self.sample_clip <= 0:
             self.sample_clip = None
+        # EOPD (entropy-aware OPD) options.
+        self.eopd_tau = float(opd_cfg.get("eopd_tau", 0.8) or 0.8)
+        self.eopd_topk = int(opd_cfg.get("eopd_topk", 16) or 16)
+        self.eopd_clip_epsilon = float(opd_cfg.get("eopd_clip_epsilon", 0.2) or 0.2)
+        self.eopd_n_ppo_epochs = int(opd_cfg.get("eopd_n_ppo_epochs", 1) or 1)
+        if self.loss_type == "eopd" and self.reward_beta is not None:
+            raise ValueError("opd.loss_type='eopd' cannot be combined with opd.reward_beta weighting.")
         # Entropy-direction position mask (sampled-token OPD only):
         #   null/none -> every sampled position
         #   "lt"      -> only H_S < H_T - margin (student sharper)
@@ -583,6 +590,11 @@ class OPDTrainer(RayPPOTrainer):
                         opd_batch.meta_info["opd_entropy_mask_margin"] = self.entropy_mask_margin
                     if self.reward_beta is not None:
                         opd_batch.meta_info["opd_reward_beta"] = self.reward_beta
+                    if self.loss_type == "eopd":
+                        opd_batch.meta_info["opd_eopd_tau"] = self.eopd_tau
+                        opd_batch.meta_info["opd_eopd_topk"] = self.eopd_topk
+                        opd_batch.meta_info["opd_eopd_clip_epsilon"] = self.eopd_clip_epsilon
+                        opd_batch.meta_info["opd_eopd_n_ppo_epochs"] = self.eopd_n_ppo_epochs
 
                     opd_output = self.actor_rollout_wg.update_opd(opd_batch)
                     opd_metrics = reduce_metrics(opd_output.meta_info["metrics"])

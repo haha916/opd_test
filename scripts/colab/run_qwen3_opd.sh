@@ -114,6 +114,13 @@ ENABLE_THINKING=${ENABLE_THINKING:-False}
 ENTROPY_MASK=${ENTROPY_MASK:-}
 ENTROPY_MASK_MARGIN=${ENTROPY_MASK_MARGIN:-0.0}
 
+# OPD loss: sample_reverse_kl (default) or eopd.
+OPD_LOSS_TYPE=${OPD_LOSS_TYPE:-sample_reverse_kl}
+EOPD_TAU=${EOPD_TAU:-0.8}
+EOPD_TOPK=${EOPD_TOPK:-16}
+EOPD_CLIP_EPSILON=${EOPD_CLIP_EPSILON:-0.2}
+EOPD_N_PPO_EPOCHS=${EOPD_N_PPO_EPOCHS:-1}
+
 if "$PYTHON" -c "import flash_attn" >/dev/null 2>&1; then
     USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-True}
     ATTN_IMPL=${ATTN_IMPL:-}
@@ -157,6 +164,8 @@ echo "data     : $DATA_DIR"
 echo "gpu      : ${VRAM_GB}GB | micro_batch=$PPO_MICRO_BATCH_SIZE_PER_GPU | vllm_mem=$GPU_MEM_UTIL"
 echo "steps    : $TOTAL_TRAINING_STEPS (batch $TRAIN_BATCH_SIZE, opd_size $OPD_TRAIN_SIZE = batch x $OPD_DATA_STEPS)"
 echo "save     : every $SAVE_FREQ steps, keep last $MAX_ACTOR_CKPT_TO_KEEP"
+echo "loss     : $OPD_LOSS_TYPE"
+echo "eopd     : tau=$EOPD_TAU topk=$EOPD_TOPK clip=$EOPD_CLIP_EPSILON n_ppo_epochs=$EOPD_N_PPO_EPOCHS"
 echo "mask     : ${ENTROPY_MASK:-<none>} (margin $ENTROPY_MASK_MARGIN)"
 echo "eval     : $BENCHMARKS | n=$EVAL_N | max_tokens=$EVAL_MAX_TOKENS | T=$EVAL_TEMPERATURE p=$EVAL_TOP_P k=$EVAL_TOP_K"
 echo "====================================="
@@ -233,6 +242,11 @@ if [ "${SKIP_TRAIN:-0}" != "1" ]; then
     USE_REMOVE_PADDING="$USE_REMOVE_PADDING" \
     ATTN_IMPL="$ATTN_IMPL" \
     FREEZE_LM_HEAD="$FREEZE_LM_HEAD" \
+    OPD_LOSS_TYPE="$OPD_LOSS_TYPE" \
+    EOPD_TAU="$EOPD_TAU" \
+    EOPD_TOPK="$EOPD_TOPK" \
+    EOPD_CLIP_EPSILON="$EOPD_CLIP_EPSILON" \
+    EOPD_N_PPO_EPOCHS="$EOPD_N_PPO_EPOCHS" \
     ENTROPY_MASK="$ENTROPY_MASK" \
     ENTROPY_MASK_MARGIN="$ENTROPY_MASK_MARGIN" \
     PLATEAU_ENABLE="$PLATEAU_ENABLE" \

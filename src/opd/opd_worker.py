@@ -41,8 +41,11 @@ from .freeze import (
 from .losses import (
     LOSS_FN_MAP,
     SAMPLE_LOSS_TYPES,
+    chunked_target_logprobs,
+    compute_eopd_loss,
     compute_sample_reverse_kl_loss,
     compute_teacher_token_stats,
+    extract_eopd_teacher_info,
     sample_reverse_kl_token_terms,
     select_entropy_mask,
 )
@@ -236,6 +239,7 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         Meta info:
           opd_loss_type: "reverse_kl" | "forward_kl" | "jsd"
                          | "sample_reverse_kl" (sampled-token OPD)
+                         | "eopd" (entropy-aware OPD)
           opd_beta: JSD interpolation (only used for jsd)
           opd_chunk_size: tokens per chunk for loss computation
           opd_sample_clip: optional clip on the stop-gradient log-ratio
@@ -243,6 +247,10 @@ class OPDWorker(AsyncActorRolloutRefWorker):
           opd_entropy_mask: optional "lt" | "gt" position mask for
                             sampled-token OPD (H_S < H_T or H_S > H_T)
           opd_entropy_mask_margin: margin (nats) added in the selected direction
+          opd_eopd_tau: teacher-entropy threshold for the EOPD forward-KL term
+          opd_eopd_topk: teacher top-k tokens used by the EOPD forward KL
+          opd_eopd_clip_epsilon: PPO clip range of the EOPD reverse-KL term
+          opd_eopd_n_ppo_epochs: gradient epochs per rollout batch
         """
         assert self._is_actor, "update_opd requires actor role"
 
@@ -259,6 +267,11 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         chunk_size = data.meta_info.get("opd_chunk_size", 512)
         sample_clip = data.meta_info.get("opd_sample_clip", None)
         sample_mode = loss_type in SAMPLE_LOSS_TYPES
+        eopd_mode = loss_type == "eopd"
+        eopd_tau = float(data.meta_info.get("opd_eopd_tau", 0.8))
+        eopd_topk = int(data.meta_info.get("opd_eopd_topk", 16))
+        eopd_clip_epsilon = float(data.meta_info.get("opd_eopd_clip_epsilon", 0.2))
+        eopd_n_ppo_epochs = int(data.meta_info.get("opd_eopd_n_ppo_epochs", 1) or 1)
 
         # Entropy-direction position mask (sampled-token OPD only):
         #   "lt" -> train only where H_S < H_T - margin (student sharper)
@@ -284,6 +297,14 @@ class OPDWorker(AsyncActorRolloutRefWorker):
             raise ValueError(
                 "opd_entropy_mask cannot be combined with per-sample reward weighting "
                 "(opd.reward_beta)."
+            )
+        if eopd_mode and entropy_mask is not None:
+            raise ValueError("opd_entropy_mask cannot be combined with loss_type='eopd'.")
+        if eopd_mode and use_sample_weights:
+            raise ValueError("EOPD cannot be combined with per-sample reward weighting (opd.reward_beta).")
+        if eopd_mode and self.ulysses_sequence_parallel_size > 1:
+            raise NotImplementedError(
+                "EOPD target/logit alignment is only implemented for Ulysses SP=1."
             )
 
         use_remove_padding = self.config.model.get("use_remove_padding", False)
@@ -349,27 +370,35 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                             i, list(t_input_ids.shape), int(t_loss_mask[:, 1:].sum().item()))
                 _mem(f"phase1-mb{i}-before-teacher-fwd")
 
-                if sample_mode:
+                if eopd_mode:
                     with torch.no_grad():
-                        # The token-logprob helpers always return (targets, logprobs, entropy);
-                        # the teacher only caches entropy when the position mask needs H_T.
-                        t_targets, t_logprobs, t_entropy = forward_fn(
-                            self.ref_module_fsdp, t_input_ids, t_attention_mask, t_position_ids,
-                            t_loss_mask, chunk_size=chunk_size,
-                            compute_entropy=compute_teacher_entropy,
+                        teacher_logits = forward_fn(
+                            self.ref_module_fsdp, t_input_ids, t_attention_mask, t_position_ids, t_loss_mask
                         )
-                    logger.info("[OPD-MEM] phase1 micro_batch[%d]: cached teacher token logprobs shape=%s%s",
-                                i, list(t_logprobs.shape),
-                                ", with entropy" if compute_teacher_entropy else "")
-                    teacher_logits_cache.append(
-                        ((
-                            t_targets.to("cpu"),
-                            t_logprobs.float().to("cpu"),
-                            t_entropy.float().to("cpu") if compute_teacher_entropy else None,
-                        ), True)
+                        if use_remove_padding:
+                            t_targets = self._extract_response_target_ids_unpadded(
+                                t_input_ids, t_attention_mask, t_loss_mask
+                            )
+                        else:
+                            t_targets = self._extract_response_target_ids_padded(t_input_ids, t_loss_mask)
+                        teacher_info = extract_eopd_teacher_info(
+                            teacher_logits, t_targets,
+                            topk=eopd_topk, entropy_threshold=eopd_tau, chunk_size=chunk_size,
+                        )
+                    teacher_info = {
+                        key: (value.cpu() if torch.is_tensor(value) else value)
+                        for key, value in teacher_info.items()
+                    }
+                    teacher_info["target_ids"] = t_targets.cpu()
+                    high_entropy = float(teacher_info["entropy_mask"].float().mean().item())
+                    logger.info(
+                        "[OPD-MEM] phase1 micro_batch[%d]: cached EOPD teacher info tokens=%d "
+                        "high_entropy=%.3f topk=%d",
+                        i, teacher_info["n_tokens"], high_entropy, eopd_topk,
                     )
-                    del t_targets, t_logprobs, t_entropy
-                else:
+                    teacher_logits_cache.append((teacher_info, teacher_info["n_tokens"] > 0))
+                    del teacher_logits, t_targets, teacher_info
+                elif sample_mode:
                     with torch.no_grad():
                         teacher_logits = forward_fn(
                             self.ref_module_fsdp, t_input_ids, t_attention_mask, t_position_ids, t_loss_mask
@@ -399,15 +428,24 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=device)
             _mem("phase2-after-optimizer-load")
 
-            metrics = self._opd_training_step(
-                micro_batches, teacher_logits_cache,
-                loss_type=loss_type, beta=beta, chunk_size=chunk_size,
-                use_remove_padding=use_remove_padding, device=device, batch_size=batch_size,
-                use_sample_weights=use_sample_weights,
-                sample_mode=sample_mode, sample_clip=sample_clip,
-                entropy_mask_direction=entropy_mask,
-                entropy_mask_margin=entropy_mask_margin,
-            )
+            if eopd_mode:
+                metrics = self._eopd_training_step(
+                    micro_batches, teacher_logits_cache,
+                    eopd_clip_epsilon=eopd_clip_epsilon,
+                    eopd_n_ppo_epochs=eopd_n_ppo_epochs,
+                    chunk_size=chunk_size,
+                    use_remove_padding=use_remove_padding, device=device, batch_size=batch_size,
+                )
+            else:
+                metrics = self._opd_training_step(
+                    micro_batches, teacher_logits_cache,
+                    loss_type=loss_type, beta=beta, chunk_size=chunk_size,
+                    use_remove_padding=use_remove_padding, device=device, batch_size=batch_size,
+                    use_sample_weights=use_sample_weights,
+                    sample_mode=sample_mode, sample_clip=sample_clip,
+                    entropy_mask_direction=entropy_mask,
+                    entropy_mask_margin=entropy_mask_margin,
+                )
 
             lr = self.actor_lr_scheduler.get_last_lr()[0]
             metrics["opd/lr"] = lr.item() if torch.is_tensor(lr) else lr
@@ -769,6 +807,174 @@ class OPDWorker(AsyncActorRolloutRefWorker):
             metrics["opd/entropy_mask_frac"] = total_tokens / max(1, total_response_tokens)
             metrics["opd/teacher_entropy"] = total_teacher_entropy_sum / max(1, total_teacher_entropy_count)
         return metrics
+
+    def _eopd_training_step(
+        self,
+        micro_batches: list,
+        teacher_info_cache: list,
+        eopd_clip_epsilon: float = 0.2,
+        eopd_n_ppo_epochs: int = 1,
+        chunk_size: int = 512,
+        use_remove_padding: bool = False,
+        device: int = 0,
+        batch_size: int = 0,
+    ) -> dict:
+        """One EOPD step: clipped sampled reverse KL + entropy-gated top-k FKL.
+
+        Phase 1 cached the teacher's sampled-token log-prob, entropy, top-k
+        distribution and the high-entropy mask. Here we
+          1. run one no-grad student pass for the behavior-policy log-probs
+             required by the PPO importance ratio, then
+          2. run ``eopd_n_ppo_epochs`` gradient epochs over the student logits.
+        """
+        self.actor_module_fsdp.train()
+
+        active = [
+            i for i, (info, ok) in enumerate(teacher_info_cache)
+            if ok and info is not None and info["n_tokens"] > 0
+        ]
+        if not active:
+            self.actor_optimizer.zero_grad()
+            return {
+                "opd/loss": 0.0, "opd/num_tokens": 0, "opd/response_tokens": 0,
+                "opd/batch_size": int(batch_size), "opd/valid_rows": 0,
+                "opd/grad_norm": 0.0, "opd/entropy": 0.0,
+                "opd/eopd_rkl_loss": 0.0, "opd/eopd_fkl_loss": 0.0,
+                "opd/eopd_high_entropy_fraction": 0.0, "opd/eopd_clip_fraction": 0.0,
+                "opd/eopd_teacher_entropy": 0.0,
+            }
+
+        grad_accum = len(active)
+        token_fwd = (
+            self._forward_token_logprobs_unpadded if use_remove_padding
+            else self._forward_token_logprobs_padded
+        )
+        logits_fwd = self._forward_logits_unpadded if use_remove_padding else self._forward_logits_padded
+
+        def _student_inputs(micro_batch):
+            mb = micro_batch.to(device)
+            valid_row_mask = mb.batch.get("valid_row_mask")
+            s_ids = mb.batch["student_input_ids"]
+            s_attn = mb.batch["student_attention_mask"]
+            s_pos = mb.batch["student_position_ids"]
+            s_mask = mb.batch["student_loss_mask"]
+            if valid_row_mask is not None:
+                vm = valid_row_mask.bool()
+                s_ids = s_ids[vm]
+                s_attn = s_attn[vm]
+                s_pos = s_pos[vm]
+                s_mask = s_mask[vm]
+            return s_ids, s_attn, s_pos, s_mask
+
+        # ------------------------------------------------------------------
+        # Behavior policy pi_old: one no-grad student pass before any update.
+        # ------------------------------------------------------------------
+        old_logprobs = {}
+        total_entropy_sum = 0.0
+        total_teacher_entropy_sum = 0.0
+        total_response_tokens = 0
+        for i in active:
+            s_ids, s_attn, s_pos, s_mask = _student_inputs(micro_batches[i])
+            with torch.no_grad():
+                targets, lps, ent = token_fwd(
+                    self.actor_module_fsdp, s_ids, s_attn, s_pos, s_mask,
+                    chunk_size=chunk_size, compute_entropy=True,
+                )
+            cached_targets = teacher_info_cache[i][0]["target_ids"].to(device)
+            if targets.numel() != cached_targets.numel() or not torch.equal(targets, cached_targets):
+                raise RuntimeError(
+                    "EOPD teacher/student target token IDs diverged; both sides must "
+                    "use identical prompt/response tokenization."
+                )
+            old_logprobs[i] = lps.detach().float().to("cpu")
+            total_entropy_sum += float(ent.detach().sum().item())
+            total_teacher_entropy_sum += float(
+                teacher_info_cache[i][0]["teacher_entropy"].sum().item()
+            )
+            total_response_tokens += int(targets.numel())
+            del targets, lps, ent
+        torch.cuda.empty_cache()
+
+        # ------------------------------------------------------------------
+        # PPO-style gradient epochs against the cached teacher statistics.
+        # ------------------------------------------------------------------
+        acc = {
+            "eopd/rkl_loss": 0.0,
+            "eopd/fkl_loss": 0.0,
+            "eopd/high_entropy_fraction": 0.0,
+            "eopd/clip_fraction": 0.0,
+            "eopd/total_loss": 0.0,
+        }
+        n_updates = 0
+        total_grad_norm = 0.0
+        for _epoch in range(max(1, eopd_n_ppo_epochs)):
+            self.actor_optimizer.zero_grad()
+            for i in active:
+                s_ids, s_attn, s_pos, s_mask = _student_inputs(micro_batches[i])
+                info = teacher_info_cache[i][0]
+                target_ids = info["target_ids"].to(device)
+                t_lp = info["teacher_log_probs"].to(device=device, dtype=torch.float32)
+                t_topk_i = info["teacher_topk_indices"].to(device)
+                t_topk_p = info["teacher_topk_probs"].to(device=device, dtype=torch.float32)
+                e_mask = info["entropy_mask"].to(device)
+                old_lp = old_logprobs[i].to(device=device, dtype=torch.float32)
+
+                student_logits = logits_fwd(
+                    self.actor_module_fsdp, s_ids, s_attn, s_pos, s_mask
+                )
+                current_lp = chunked_target_logprobs(student_logits, target_ids, chunk_size=chunk_size)
+                loss, step_metrics = compute_eopd_loss(
+                    teacher_log_probs=t_lp,
+                    old_log_probs=old_lp,
+                    current_log_probs=current_lp,
+                    teacher_topk_indices=t_topk_i,
+                    teacher_topk_probs=t_topk_p,
+                    student_logits=student_logits,
+                    entropy_mask=e_mask,
+                    clip_epsilon=eopd_clip_epsilon,
+                    chunk_size=chunk_size,
+                )
+                (loss / grad_accum).backward()
+                for key in acc:
+                    acc[key] += float(step_metrics[key])
+                n_updates += 1
+
+                del student_logits, current_lp, loss, step_metrics
+                del t_lp, t_topk_i, t_topk_p, e_mask, old_lp, target_ids
+
+            grad_clip = self.config.actor.get("grad_clip", 1.0)
+            if isinstance(self.actor_module_fsdp, FSDP):
+                grad_norm = self.actor_module_fsdp.clip_grad_norm_(max_norm=grad_clip)
+            else:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.actor_module_fsdp.parameters(), max_norm=grad_clip
+                )
+            if hasattr(grad_norm, "full_tensor"):
+                grad_norm = grad_norm.full_tensor()
+            if torch.isfinite(grad_norm):
+                self.actor_optimizer.step()
+            else:
+                logger.warning("EOPD: non-finite grad_norm %.4f, skipping step", grad_norm.item())
+                self.actor_optimizer.zero_grad()
+            total_grad_norm += float(grad_norm.detach().item())
+
+        return {
+            "opd/loss": acc["eopd/total_loss"] / max(1, n_updates),
+            "opd/entropy": total_entropy_sum / max(1, total_response_tokens),
+            "opd/grad_norm": total_grad_norm / max(1, eopd_n_ppo_epochs),
+            "opd/num_tokens": int(total_response_tokens),
+            "opd/response_tokens": int(total_response_tokens),
+            "opd/batch_size": int(batch_size),
+            "opd/valid_rows": int(sum(teacher_info_cache[i][0]["n_tokens"] for i in active)),
+            "opd/eopd_rkl_loss": acc["eopd/rkl_loss"] / max(1, n_updates),
+            "opd/eopd_fkl_loss": acc["eopd/fkl_loss"] / max(1, n_updates),
+            "opd/eopd_high_entropy_fraction": acc["eopd/high_entropy_fraction"] / max(1, n_updates),
+            "opd/eopd_clip_fraction": acc["eopd/clip_fraction"] / max(1, n_updates),
+            "opd/eopd_teacher_entropy": (
+                total_teacher_entropy_sum / max(1, total_response_tokens)
+            ),
+            "opd/eopd_n_ppo_epochs": eopd_n_ppo_epochs,
+        }
 
     def _extract_response_target_ids_padded(self, input_ids, loss_mask):
         """Extract next-token target IDs at response positions (padded path)."""

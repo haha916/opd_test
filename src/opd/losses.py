@@ -504,3 +504,202 @@ LOSS_FN_MAP = {
 SAMPLE_LOSS_TYPES = frozenset({
     "sample_reverse_kl", "sampled_reverse_kl", "sample_kl", "sample_opd",
 })
+
+
+# ---------------------------------------------------------------------------
+# EOPD: entropy-aware on-policy distillation (Jin et al., 2026,
+# arXiv:2603.07079). The objective is
+#
+#     L_EOPD = clipped_reverse_KL(all sampled tokens)
+#              + I[H_T > tau] * top-k forward_KL
+#
+# The reversed KL term is the PPO-style importance-sampling surrogate from
+# Eq. 8; the forward KL term is computed over the teacher's top-k tokens only
+# at positions whose teacher entropy exceeds tau (Eq. 10).
+# ---------------------------------------------------------------------------
+
+
+def compute_clipped_rkl_loss(
+    teacher_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    current_log_probs: torch.Tensor,
+    clip_epsilon: float = 0.2,
+) -> tuple[torch.Tensor, int, float]:
+    """PPO-style clipped reverse KL over sampled tokens (Eq. 7-8).
+
+    Args:
+        teacher_log_probs: (N,) log pi_T(y_t), no grad.
+        old_log_probs: (N,) log pi_old(y_t) of the behavior policy, no grad.
+        current_log_probs: (N,) log pi_theta(y_t), with grad.
+        clip_epsilon: PPO clip range.
+
+    Returns:
+        (loss, n_tokens, clip_fraction)
+    """
+    n_tokens = teacher_log_probs.shape[0]
+    if n_tokens == 0:
+        return torch.tensor(0.0, device=current_log_probs.device, requires_grad=True), 0, 0.0
+
+    # Advantage: how much the teacher prefers this token over the old student.
+    advantage = (teacher_log_probs - old_log_probs).detach()
+
+    ratio = torch.exp(current_log_probs - old_log_probs.detach())
+    surr1 = -ratio * advantage
+    surr2 = -torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * advantage
+    loss_per_token = torch.max(surr1, surr2)
+
+    with torch.no_grad():
+        clip_fraction = ((ratio - 1.0).abs() > clip_epsilon).float().mean().item()
+    return loss_per_token.mean(), n_tokens, clip_fraction
+
+
+def compute_topk_fkl_loss(
+    teacher_topk_indices: torch.Tensor,
+    teacher_topk_probs: torch.Tensor,
+    student_logits: torch.Tensor,
+    entropy_mask: torch.Tensor,
+    chunk_size: int = 512,
+) -> tuple[torch.Tensor, int]:
+    """Forward KL over the teacher's top-k tokens at high-entropy positions.
+
+    Args:
+        teacher_topk_indices: (N, k) teacher top-k token ids.
+        teacher_topk_probs: (N, k) teacher probabilities renormalized over top-k.
+        student_logits: (N, V) with grad.
+        entropy_mask: (N,) bool, True where H_T > tau.
+        chunk_size: masked positions per chunk.
+
+    Returns:
+        (mean loss over masked positions, n_masked)
+    """
+    device = student_logits.device
+    masked_indices = entropy_mask.nonzero(as_tuple=True)[0]
+    n_masked = masked_indices.shape[0]
+    if n_masked == 0:
+        return torch.tensor(0.0, device=device, requires_grad=True), 0
+
+    fkl_sum = torch.tensor(0.0, device=device)
+    for start in range(0, n_masked, chunk_size):
+        idx = masked_indices[start:start + chunk_size]
+        s_lp = F.log_softmax(student_logits[idx].float(), dim=-1)
+        t_probs = teacher_topk_probs[idx].float()
+        s_lp_topk = s_lp.gather(-1, teacher_topk_indices[idx])
+        del s_lp
+        t_log_probs = t_probs.clamp(min=1e-10).log()
+        fkl_per_token = (t_probs * (t_log_probs - s_lp_topk)).sum(dim=-1)
+        del t_log_probs, s_lp_topk
+        fkl_sum = fkl_sum + fkl_per_token.sum()
+        del fkl_per_token
+    return fkl_sum / n_masked, n_masked
+
+
+def compute_eopd_loss(
+    teacher_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    current_log_probs: torch.Tensor,
+    teacher_topk_indices: torch.Tensor,
+    teacher_topk_probs: torch.Tensor,
+    student_logits: torch.Tensor,
+    entropy_mask: torch.Tensor,
+    clip_epsilon: float = 0.2,
+    chunk_size: int = 512,
+) -> tuple[torch.Tensor, dict]:
+    """Combined EOPD objective (Eq. 9).
+
+    L = mean_t [clipped RKL_t] + (1/N) * sum_{t: H_T>tau} FKL_topk_t
+    """
+    n_tokens = teacher_log_probs.shape[0]
+    rkl_loss, _, clip_frac = compute_clipped_rkl_loss(
+        teacher_log_probs, old_log_probs, current_log_probs, clip_epsilon,
+    )
+    fkl_per_masked, n_masked = compute_topk_fkl_loss(
+        teacher_topk_indices, teacher_topk_probs, student_logits, entropy_mask, chunk_size,
+    )
+    # Convert the masked mean into the paper's token-mean normalization:
+    # (1/N) * sum_{masked} FKL = (n_masked / N) * mean_{masked} FKL.
+    fkl_weight = n_masked / max(1, n_tokens)
+    fkl_loss = fkl_per_masked * fkl_weight
+    total_loss = rkl_loss + fkl_loss
+
+    metrics = {
+        "eopd/rkl_loss": rkl_loss.detach().item(),
+        "eopd/fkl_loss": fkl_loss.detach().item(),
+        "eopd/fkl_loss_per_masked": fkl_per_masked.detach().item(),
+        "eopd/total_loss": total_loss.detach().item(),
+        "eopd/clip_fraction": clip_frac,
+        "eopd/high_entropy_tokens": n_masked,
+        "eopd/high_entropy_fraction": n_masked / max(1, n_tokens),
+    }
+    return total_loss, metrics
+
+
+@torch.no_grad()
+def extract_eopd_teacher_info(
+    teacher_logits: torch.Tensor,
+    target_ids: torch.Tensor,
+    topk: int = 16,
+    entropy_threshold: float = 0.8,
+    chunk_size: int = 512,
+) -> dict:
+    """Extract the compact per-token teacher statistics EOPD needs.
+
+    Chunked so the (chunk, V) log-softmax never exceeds ``chunk_size * V``.
+    Returns CPU-free tensors; the caller moves them to CPU.
+    """
+    n_tokens = teacher_logits.shape[0]
+    if n_tokens == 0:
+        empty = teacher_logits.new_empty((0,))
+        return {
+            "teacher_log_probs": empty,
+            "teacher_entropy": empty,
+            "teacher_topk_indices": teacher_logits.new_empty((0, topk), dtype=torch.long),
+            "teacher_topk_probs": empty.new_empty((0, topk)),
+            "entropy_mask": torch.empty(0, dtype=torch.bool),
+            "n_tokens": 0,
+        }
+
+    token_lps, entropies, topk_indices, topk_probs = [], [], [], []
+    for start in range(0, n_tokens, chunk_size):
+        end = min(start + chunk_size, n_tokens)
+        chunk = teacher_logits[start:end]
+        tgt = target_ids[start:end]
+
+        t_lp = F.log_softmax(chunk.float(), dim=-1)
+        t_p = t_lp.exp()
+        entropy = -(t_p * t_lp).sum(dim=-1)
+        top_p, top_i = t_p.topk(topk, dim=-1)
+        top_p = top_p / top_p.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        token_lp = t_lp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
+
+        token_lps.append(token_lp)
+        entropies.append(entropy)
+        topk_indices.append(top_i)
+        topk_probs.append(top_p)
+        del t_lp, t_p, entropy, top_p, top_i, token_lp
+
+    entropy = torch.cat(entropies)
+    return {
+        "teacher_log_probs": torch.cat(token_lps).float(),
+        "teacher_entropy": entropy.float(),
+        "teacher_topk_indices": torch.cat(topk_indices),
+        "teacher_topk_probs": torch.cat(topk_probs).float(),
+        "entropy_mask": entropy > entropy_threshold,
+        "n_tokens": n_tokens,
+    }
+
+
+def chunked_target_logprobs(
+    logits: torch.Tensor,
+    target_ids: torch.Tensor,
+    chunk_size: int = 512,
+) -> torch.Tensor:
+    """log pi_theta(y_t) for response-position logits, chunked but differentiable."""
+    parts = []
+    for start in range(0, logits.shape[0], chunk_size):
+        end = min(start + chunk_size, logits.shape[0])
+        lp = F.log_softmax(logits[start:end].float(), dim=-1)
+        parts.append(lp.gather(-1, target_ids[start:end].unsqueeze(-1)).squeeze(-1))
+        del lp
+    if not parts:
+        return logits.new_zeros((0,), dtype=torch.float32)
+    return torch.cat(parts)

@@ -95,6 +95,12 @@ opd_loss_type=${OPD_LOSS_TYPE:-sample_reverse_kl}
 opd_chunk_size=${OPD_CHUNK_SIZE:-256}
 sample_clip=${SAMPLE_CLIP:-}
 
+# EOPD hyperparameters (only used when OPD_LOSS_TYPE=eopd).
+eopd_tau=${EOPD_TAU:-0.8}
+eopd_topk=${EOPD_TOPK:-16}
+eopd_clip_epsilon=${EOPD_CLIP_EPSILON:-0.2}
+eopd_n_ppo_epochs=${EOPD_N_PPO_EPOCHS:-1}
+
 # Entropy-direction position mask (sampled-token OPD only):
 #   ENTROPY_MASK=lt  -> train only where H_S < H_T - margin (student sharper)
 #   ENTROPY_MASK=gt  -> train only where H_S > H_T + margin (student flatter)
@@ -272,6 +278,7 @@ echo "learning_rate: $learning_rate"
 echo "enable_thinking: $enable_thinking (shared student+teacher input sequence)"
 echo "freeze_lm_head: $freeze_lm_head"
 echo "entropy_mask: ${opd_entropy_mask:-<none>} (margin=$entropy_mask_margin)"
+echo "eopd (only if loss_type=eopd): tau=$eopd_tau topk=$eopd_topk clip=$eopd_clip_epsilon n_ppo_epochs=$eopd_n_ppo_epochs"
 echo "train_response_length: $train_response_length"
 echo "eval_response_length: $eval_response_length"
 echo "test_freq: $test_freq (val_n=$val_n, aime24/aime25; <=0 disables all validation)"
@@ -340,6 +347,10 @@ python -m opd.main_opd \
     opd.loss_type=$opd_loss_type \
     opd.chunk_size=$opd_chunk_size \
     opd.max_length=$opd_max_length \
+    opd.eopd_tau=$eopd_tau \
+    opd.eopd_topk=$eopd_topk \
+    opd.eopd_clip_epsilon=$eopd_clip_epsilon \
+    opd.eopd_n_ppo_epochs=$eopd_n_ppo_epochs \
     opd.freeze_lm_head=$freeze_lm_head \
     ${sample_clip:+"opd.sample_clip=$sample_clip"} \
     ${opd_entropy_mask:+"opd.entropy_mask=$opd_entropy_mask"} \

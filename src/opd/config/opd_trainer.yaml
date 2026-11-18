@@ -93,6 +93,9 @@ opd:
   #     form): L = mean_t sg(log pi_S(y_t) - log pi_T(y_t)) * log pi_S(y_t).
   #     No (N, V) teacher logits are cached and no full-vocab probability
   #     tensor is materialized.
+  #   eopd: EOPD (Jin et al., 2026, arXiv:2603.07079). PPO-clipped sampled
+  #     reverse KL at every position plus a forward KL over the teacher's
+  #     top-k tokens at positions with teacher entropy > eopd_tau.
   loss_type: reverse_kl
 
   # JSD interpolation parameter (only used when loss_type=jsd)
@@ -121,6 +124,17 @@ opd:
   # reward_beta weighting.
   entropy_mask: null
   entropy_mask_margin: 0.0
+
+  # EOPD (loss_type=eopd): entropy-aware on-policy distillation.
+  #   eopd_tau: teacher-entropy threshold (nats) for the extra forward-KL term
+  #   eopd_topk: teacher top-k tokens used for that forward KL
+  #   eopd_clip_epsilon: PPO clip range on the importance ratio
+  #   eopd_n_ppo_epochs: gradient epochs per rollout batch (paper default 4;
+  #     1 keeps one optimizer step per training step)
+  eopd_tau: 0.8
+  eopd_topk: 16
+  eopd_clip_epsilon: 0.2
+  eopd_n_ppo_epochs: 1
 
   # Freeze the vocabulary-sized output projection (lm_head) of the student.
   # The head still produces the logits needed by the sampled-token loss, but
