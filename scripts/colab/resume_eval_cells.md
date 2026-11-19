@@ -1,40 +1,38 @@
-# Colab：Qwen3-1.7B ← Qwen3-4B-Instruct-2507（EOPD，lr = 3e-6）
+# Colab：60 步 FKL 对比（正常 on-policy FKL vs 固定轨迹 FKL）
 
-EOPD（entropy-aware on-policy distillation，Jin et al., 2026，arXiv:2603.07079）：
+两个 arm，均训练 **60 步**、lr **3e-6**、学生 `Qwen3-1.7B`、教师
+`Qwen3-4B-Instruct-2507`、非 thinking：
 
-```
-L = PPO-clipped sampled reverse KL（所有采样位置）
-    + 1[H_T > tau] * forward KL（教师 top-k token，只在教师高熵位置）
-```
+| arm | 数据 | batch | 说明 |
+|---|---|---|---|
+| A：正常 FKL | on-policy（当前学生在线采样） | 按 Colab RAM 自动选 16/8/4 | verl OPD，`loss_type=forward_kl`，全词表 FKL |
+| B：固定轨迹 FKL | 本地那 64 条固定轨迹 | 64 | `train_fixed_pool_position_mask_loss.py --all-positions --loss fkl` |
 
-用法：把下面 cell 依次贴进 Colab notebook 运行。
+两个 arm 都只保留最终 checkpoint，**评测完立即删除权重**（`KEEP_WEIGHTS=0` 默认）。
+评测内容：
 
-| 角色 | Colab 路径 | HuggingFace repo |
-|---|---|---|
-| 学生 | `/content/models/Qwen3-1.7B` | `Qwen/Qwen3-1.7B` |
-| 教师 | `/content/models/Qwen3-4B-Instruct-2507` | `Qwen/Qwen3-4B-Instruct-2507` |
+- aime24 / aime25 / amc23，n=4，32k，**T=1.0，top_p=1.0，top_k=-1**，base tokenizer；
+- held-out 64 条（与固定池训练轨迹零重叠）的 **全词表 RKL / FKL**。
 
-- 学生**不开 thinking**（`ENABLE_THINKING=False`）。
-- 如果运行时的 `/workspace/models/models/Qwen3-1.7B`、
-  `/workspace/models/models/Qwen3-4B-Instruct-2507` 已经存在，脚本会**自动复用**、
-  不再下载；否则下载到 `/content/models/` 下。也可以用 `MODEL_PATH` /
-  `TEACHER_MODEL_PATH` 显式指定。
-- **新运行时 `/content` 全部丢失**（代码、venv、模型、数据），只有 Drive 保留。
-  Cell 3 会自动重建环境、重新下载模型和数据；setup 约 15–25 分钟，已存在的项会跳过。
-- 训练：**80 步**，lr `3e-6`，每 10 步保存一次，只留最后 5 个
-  （**step 40/50/60/70/80**）；训练完**只评测这 5 个** checkpoint。
-- EOPD 默认参数：`tau=0.8`（教师熵阈值）、`topk=16`、`clip_epsilon=0.2`、
-  `n_ppo_epochs=1`（每个训练步一次优化器更新；论文默认 4，可用
-  `EOPD_N_PPO_EPOCHS=4` 覆盖）。日志里看 `opd/eopd_rkl_loss`、
-  `opd/eopd_fkl_loss`、`opd/eopd_high_entropy_fraction`、`opd/eopd_clip_fraction`。
-- batch 按 GPU 自动选：A100 80G→64，A100 40G→16，L4 24G→8。
-- 评测：aime24 / aime25 / amc23，n=4，32k，**`T=1.0, top_p=1.0, top_k=-1`**，
-  **base student tokenizer**（避免 checkpoint 自带的新 chat template 改变 prompt token）。
-- 结果目录：`/content/drive/MyDrive/outputs/eval/qwen3-1.7b-eopd-lr3e6/`
-  （`report.md`、`curve.csv`、每个 step 的 `*_summary.json`）。
-- 训练日志：`/content/drive/MyDrive/outputs/logs/colab_qwen3_eopd_*.log`。
-- 训练中断只能重跑；**评测**中断可以从 Cell 1 重跑后直接跑 Cell 4 续评。
-- Colab 里用官方 `huggingface.co`，**不需要镜像**。本地（AutoDL 等）测试下载时可用
+结果写在 Drive：
+
+- `outputs/fkl60_<日期>/result.json`：两个 arm 的 macro acc/pass、held-out RKL/FKL 降幅
+- `outputs/eval/onfkl60/`、`outputs/eval/fixedfkl60/`：各自的 `all_summary.json` /
+  `holdout_kl.json` / 日志
+- `outputs/logs/fkl60_*`、`onpolicy_fkl_*`、`fixed_fkl_*`：训练和评测日志
+
+注意：
+
+- **新运行时 `/content` 全部丢失**（代码、venv、模型、数据），Cell 3 会自动重建；
+  Drive 里的结果保留。setup 约 15–25 分钟。
+- 固定池的 64 条轨迹已经压缩成 `assets/fixed_pool/train_64.jsonl`（约 0.5MB，
+  只保留 `prompt_ids` / `response_ids`），随仓库一起上传，不需要另外下载。
+- A 的 full-vocab FKL 会把教师 logits 缓存在 **CPU RAM**：batch 由脚本按
+  `free -g` 自动选（≥60G→16，≥30G→8，否则 4）。高 RAM 的 A100 Colab 用 16。
+- B 需要在 GPU 上同时放 1.7B 学生 + 4B 教师 + AdamW 状态，约需 **30GB+ 显存**；
+  小于 30GB 时脚本会跳过 B 并提示。
+- 权重删除后无法“只重跑评测”；需要保留权重时设 `KEEP_WEIGHTS=1`。
+- Colab 内用官方 `huggingface.co`，不需要镜像；本地测试可用
   `HF_ENDPOINT=https://hf-mirror.com`。
 
 ---
@@ -61,83 +59,74 @@ else
 fi
 git -C "$REPO_DIR" log --oneline -1
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+free -g | head -2
 ```
 
 ---
 
-## Cell 3 — 一键：环境/数据/模型准备 + EOPD 训练 80 步 + 评测 40–80
+## Cell 3 — 一键：setup + 两个 60 步 FKL arm + 评测 + 删权重
 
-首次（或新运行时）会自动完成：
+首次（或新运行时）自动完成：
 
-1. 创建 `/content/verl_env`（vLLM + verl + 版本 pin + FlashAttention）
+1. 创建 `/content/verl_env`（vLLM + verl + pins + FlashAttention）
 2. 下载 `Qwen3-1.7B` + `Qwen3-4B-Instruct-2507`
 3. 下载 DAPO-Math-17k（去重）、AIME24/25、AMC23 并转成 verl parquet
-4. EOPD 训练 80 步，lr 3e-6（第 40/50/60/70/80 步保存）
-5. 评测 step 40 / 50 / 60 / 70 / 80（T=1.0，top_p=1.0，top_k=-1）
+4. A：on-policy FKL 60 步（lr 3e-6，batch 按 RAM）
+5. B：固定轨迹 FKL 60 步（lr 3e-6，batch 64）
+6. 各自评测 benchmark + held-out RKL/FKL，然后删除权重
 
 可选覆盖（按需取消注释）：
 
 ```bash
-# export RUN_ID=qwen3-1.7b-eopd-lr3e6
-# export TOTAL_TRAINING_STEPS=80
-# export EOPD_TAU=0.8
-# export EOPD_TOPK=16
-# export EOPD_CLIP_EPSILON=0.2
-# export EOPD_N_PPO_EPOCHS=1
+# export SKIP_FIXED=1          # 只跑 A（例如显存 <30GB）
+# export SKIP_ONPOLICY=1       # 只跑 B
+# export STEPS=60
+# export ONPOLICY_BATCH=16
+# export FIXED_BATCH=64
+# export KEEP_WEIGHTS=1        # 保留权重（默认评测后删除）
 # export MODEL_PATH=/workspace/models/models/Qwen3-1.7B
 # export TEACHER_MODEL_PATH=/workspace/models/models/Qwen3-4B-Instruct-2507
-# export SKIP_EVAL=1        # 只训练
-# export SKIP_TRAIN=1       # 只评测
 ```
 
 ```bash
 %%bash
 set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
-
-bash "$REPO/scripts/colab/run_qwen3_eopd_pipeline.sh"
+bash "$REPO/scripts/colab/run_fkl60_pipeline.sh"
 ```
 
 ---
 
-## Cell 4 — 只重跑评测（新运行时可续）
-
-checkpoint 在 Drive 里，新运行时只需 Cell 1–3 的 setup（Cell 3 会自动跳过已完成项），
-然后跑这个 cell。已完成的 benchmark 会自动跳过。
+## Cell 4 — 查看结果（训练/评测结束后）
 
 ```bash
 %%bash
-set -uo pipefail
-REPO=/content/OPSD_OnPolicyDistillation
-export SKIP_TRAIN=1
-bash "$REPO/scripts/colab/run_qwen3_eopd_pipeline.sh"
-```
-
----
-
-## Cell 5 — 查看进度（可选，随时可跑）
-
-```bash
-%%bash
-RUN_ID=${RUN_ID:-qwen3-1.7b-eopd-lr3e6}
-EVAL_ROOT=${EVAL_ROOT:-/content/drive/MyDrive/outputs/eval/$RUN_ID}
-
-echo "== checkpoints =="
-RUN_DIR=$(find /content/drive/MyDrive/outputs -maxdepth 1 -type d \
-  -name "*-${RUN_ID}-OPD-*" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
-echo "${RUN_DIR:-<none>}"
-[ -n "${RUN_DIR:-}" ] && ls "$RUN_DIR"/global_step_*/actor/huggingface/config.json 2>/dev/null
+echo "== combined result =="
+cat /content/drive/MyDrive/outputs/fkl60_*/result.json 2>/dev/null | tail -80
 
 echo
-echo "== eval =="
-for d in "$EVAL_ROOT"/step_*; do
-  [ -d "$d" ] || continue
-  printf '%-10s ' "$(basename "$d")"
-  ls "$d"/*_summary.json 2>/dev/null | xargs -r -n1 basename | sed 's/_summary.json//' | tr '\n' ' '
-  [ -f "$d/all_summary.json" ] && printf '[COMPLETE]'
-  echo
+echo "== eval dirs =="
+for d in /content/drive/MyDrive/outputs/eval/onfkl60 /content/drive/MyDrive/outputs/eval/fixedfkl60; do
+  echo "-- $d"
+  ls "$d" 2>/dev/null
 done
-[ -f "$EVAL_ROOT/curve.csv" ] && cat "$EVAL_ROOT/curve.csv"
+```
+
+---
+
+## Cell 5 — 只跑其中一个 arm
+
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+
+# 只跑 A（正常 on-policy FKL）
+export SKIP_FIXED=1
+# 只跑 B（固定轨迹 FKL）时改成：
+# export SKIP_ONPOLICY=1
+
+bash "$REPO/scripts/colab/run_fkl60_pipeline.sh"
 ```
 
 ---
@@ -151,11 +140,9 @@ done
 set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 
-# 环境 + 数据（不下载模型、不启动训练）
 REPO_DIR="$REPO" RUN_PIPELINE=0 DOWNLOAD_MODELS=0 \
   bash "$REPO/scripts/colab/bootstrap_colab.sh"
 
-# Qwen3-1.7B 学生 / Qwen3-4B-Instruct-2507 教师
 PYTHON=/content/verl_env/bin/python \
   STUDENT_ID=Qwen/Qwen3-1.7B \
   TEACHER_ID=Qwen/Qwen3-4B-Instruct-2507 \
@@ -164,21 +151,33 @@ PYTHON=/content/verl_env/bin/python \
 
 ---
 
-## Cell 7 — 可选：2 步 smoke test（验证 EOPD loss）
+## Cell 7 — 可选：只验证 A 的 1 步（不评测）
 
-只训练 2 步、只留 1 个 checkpoint，不评测。日志里确认
-`opd/eopd_rkl_loss`、`opd/eopd_fkl_loss` 都是有限值，
-`opd/eopd_high_entropy_fraction` 在 0 和 1 之间。
+如果担心 full-vocab FKL 在目标 GPU 上 OOM，先用 2 条 prompt 跑 1 步训练、
+不评测、直接删权重。
 
 ```bash
 %%bash
 set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 export SKIP_EVAL=1
-export RUN_ID=qwen3-eopd-smoke
-export TOTAL_TRAINING_STEPS=2
+export RUN_ID=onfkl-smoke
+export OPD_LOSS_TYPE=forward_kl
+export TOTAL_TRAINING_STEPS=1
+export OPD_DATA_STEPS=1
+export TRAIN_BATCH_SIZE=2
+export PPO_MINI_BATCH_SIZE=2
+export PPO_MICRO_BATCH_SIZE_PER_GPU=1
 export SAVE_FREQ=1
 export MAX_ACTOR_CKPT_TO_KEEP=1
+export MODEL_PATH=/content/models/Qwen3-1.7B
+export TEACHER_MODEL_PATH=/content/models/Qwen3-4B-Instruct-2507
+export OUTPUT_ROOT=/content/drive/MyDrive/outputs
+export PYTHON=/content/verl_env/bin/python
 
-bash "$REPO/scripts/colab/run_qwen3_eopd_pipeline.sh"
+bash "$REPO/scripts/colab/run_qwen3_opd.sh"
+
+RUN_DIR=$(find "$OUTPUT_ROOT" -maxdepth 1 -type d -name "*-onfkl-smoke-OPD-forward_kl-*" | tail -1)
+echo "smoke run dir: $RUN_DIR"
+rm -rf "$RUN_DIR"
 ```
