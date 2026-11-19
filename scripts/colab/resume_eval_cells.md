@@ -118,7 +118,24 @@ done
 
 ---
 
-## Cell 5 — 只跑其中一个 arm
+## Cell 5 — 只重评已有 checkpoint（训练完成但评测失败时）
+
+`run_fkl60_pipeline.sh` 在评测失败时会保留 checkpoint。这个 cell **不重新训练**，
+直接对 Drive 里已有的 on-policy step60 和 fixed step60 重跑完整评测，成功后删除权重。
+
+前提：当前 runtime 还有 `/content/models` 和 `/content/data`；新 runtime 先跑
+Cell 7 的 setup。
+
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+bash "$REPO/scripts/colab/eval_fkl60_existing.sh"
+```
+
+---
+
+## Cell 6 — 只跑其中一个 arm
 
 ```bash
 %%bash
@@ -135,7 +152,7 @@ bash "$REPO/scripts/colab/run_fkl60_pipeline.sh"
 
 ---
 
-## Cell 6 — 可选：只准备环境（调试用）
+## Cell 7 — 可选：只准备环境（调试用）
 
 一键 cell 失败时，可以先单独确认环境/模型/数据是否就绪。这条不会训练。
 
@@ -155,7 +172,7 @@ PYTHON=/content/verl_env/bin/python \
 
 ---
 
-## Cell 7 — 可选：只验证 A 的 1 步（不评测）
+## Cell 8 — 可选：只验证 A 的 1 步（不评测）
 
 如果担心 full-vocab FKL 在目标 GPU 上 OOM，先用 2 条 prompt 跑 1 步训练、
 不评测、直接删权重。

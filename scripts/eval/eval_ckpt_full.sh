@@ -14,10 +14,13 @@
 #     --out-dir outputs/ARM/eval \
 #     --base-model /content/models/Qwen3-1.7B \
 #     --teacher-path /content/models/Qwen3-4B-Instruct-2507 \
+#     --data-dir /content/data/grpo_processed \
 #     --holdout-data assets/fixed_pool/holdout_64.jsonl \
 #     --holdout-selected assets/fixed_pool/holdout_64_selected.json
 #
 # Optional:
+#   --data-dir PATH        verl-format benchmark parquet dir (val_*.parquet);
+#                          unset = eval_ckpt_bench.py default
 #   --benchmarks "a b c"   default: aime24 aime25 amc23
 #   --n 4 --max-tokens 32768 --max-model-len 34000
 #   --threads 20           CPU threads for held-out KL
@@ -30,6 +33,7 @@ BASE=${BASE_MODEL:-/root/autodl-tmp/models/models/Qwen3-1.7B}
 TEACHER=${TEACHER_PATH:-/root/autodl-tmp/models/models/Qwen3-4B-Instruct-2507}
 HOLDOUT_DATA=${HOLDOUT_DATA:-$REPO/outputs/multiquery_fixed_20261109/teacher_logp.jsonl}
 HOLDOUT_SELECTED=${HOLDOUT_SELECTED:-$REPO/outputs/multiquery_fixed_20261109/state_diversity/selected_repl_64.json}
+DATA_PROCESSED=${DATA_PROCESSED:-}
 MODEL=""
 TAG=""
 OUT=""
@@ -53,6 +57,7 @@ while [ $# -gt 0 ]; do
     --teacher-path) TEACHER="$2"; shift 2 ;;
     --holdout-data) HOLDOUT_DATA="$2"; shift 2 ;;
     --holdout-selected) HOLDOUT_SELECTED="$2"; shift 2 ;;
+    --data-dir) DATA_PROCESSED="$2"; shift 2 ;;
     --benchmarks) BENCH="$2"; shift 2 ;;
     --n) N="$2"; shift 2 ;;
     --max-tokens) MAXTOK="$2"; shift 2 ;;
@@ -82,12 +87,17 @@ echo "[$(date '+%H:%M:%S')] held-out RKL/FKL (CPU, ${THREADS} threads) -> $OUT/h
 HP=$!
 
 echo "[$(date '+%H:%M:%S')] benchmark eval (GPU) tag=$TAG"
+DATA_ARG=()
+if [ -n "$DATA_PROCESSED" ]; then
+  DATA_ARG=(--data-dir "$DATA_PROCESSED")
+fi
 "$PY" -I "$REPO/scripts/eval/eval_ckpt_bench.py" \
   --model-path "$MODEL" \
   --tokenizer-path "$BASE" \
   --tag "$TAG" \
   --benchmarks $BENCH \
   --out-dir "$OUT" \
+  "${DATA_ARG[@]}" \
   --n "$N" --max-tokens "$MAXTOK" --max-model-len "$MAXLEN" \
   --temperature 1.0 --top-p 1.0 \
   --gpu-memory-utilization 0.9 --max-num-seqs 12 \

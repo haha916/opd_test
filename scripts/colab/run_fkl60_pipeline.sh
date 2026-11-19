@@ -211,6 +211,7 @@ if [ "$SKIP_ONPOLICY" != "1" ]; then
             --out-dir "$ON_EVAL_DIR" \
             --base-model "$MODEL_PATH" \
             --teacher-path "$TEACHER_MODEL_PATH" \
+            --data-dir "$DATA_DIR/grpo_processed" \
             --holdout-data "$REPO/assets/fixed_pool/holdout_64.jsonl" \
             --holdout-selected "$REPO/assets/fixed_pool/holdout_64_selected.json" \
             --n 4 --max-tokens 32768 --max-model-len 34000 \
@@ -263,6 +264,7 @@ if [ "$SKIP_FIXED" != "1" ]; then
             --out-dir "$FIX_EVAL_DIR" \
             --base-model "$MODEL_PATH" \
             --teacher-path "$TEACHER_MODEL_PATH" \
+            --data-dir "$DATA_DIR/grpo_processed" \
             --holdout-data "$REPO/assets/fixed_pool/holdout_64.jsonl" \
             --holdout-selected "$REPO/assets/fixed_pool/holdout_64_selected.json" \
             --n 4 --max-tokens 32768 --max-model-len 34000 \
