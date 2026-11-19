@@ -4,7 +4,8 @@
 #   A) normal (on-policy) FKL:
 #        verl OPD, loss_type=forward_kl, Qwen3-1.7B <- Qwen3-4B-Instruct-2507,
 #        non-thinking, lr 3e-6, 60 steps, batch chosen from system RAM
-#        (the full-vocab teacher-logit cache lives on CPU).
+#        (the full-vocab teacher-logit cache lives on CPU). Rollout generations
+#        are capped at 7168 tokens to match the fixed trajectories.
 #
 #   B) fixed-trajectory FKL:
 #        train_fixed_pool_position_mask_loss.py --all-positions --loss fkl,
@@ -192,6 +193,7 @@ if [ "$SKIP_ONPOLICY" != "1" ]; then
     PLATEAU_ENABLE=False \
     TEST_FREQ=-1 \
     ENABLE_THINKING=False \
+    TRAIN_RESPONSE_LENGTH=7168 \
     GPU_MEM_UTIL=0.5 \
     bash "$REPO/scripts/colab/run_qwen3_opd.sh"
     ON_RC=$?

@@ -5,7 +5,7 @@
 
 | arm | 数据 | batch | 说明 |
 |---|---|---|---|
-| A：正常 FKL | on-policy（当前学生在线采样） | 按 Colab RAM 自动选 16/8/4 | verl OPD，`loss_type=forward_kl`，全词表 FKL |
+| A：正常 FKL | on-policy（当前学生在线采样） | 按 Colab RAM 自动选 16/8/4 | verl OPD，`loss_type=forward_kl`，全词表 FKL；rollout 最大生成 **7168** |
 | B：固定轨迹 FKL | 本地那 64 条固定轨迹 | 64 | `train_fixed_pool_position_mask_loss.py --all-positions --loss fkl` |
 
 两个 arm 都只保留最终 checkpoint，**评测成功后删除权重**（`KEEP_WEIGHTS=0` 默认；
@@ -30,6 +30,8 @@
   只保留 `prompt_ids` / `response_ids`），随仓库一起上传，不需要另外下载。
 - A 的 full-vocab FKL 会把教师 logits 缓存在 **CPU RAM**：batch 由脚本按
   `free -g` 自动选（≥60G→16，≥30G→8，否则 4）。高 RAM 的 A100 Colab 用 16。
+- A 的 rollout 最大生成长度为 **7168**（`TRAIN_RESPONSE_LENGTH=7168`），与固定轨迹
+  生成时的 7168 上限一致；评测仍然生成到 32k。
 - B 需要在 GPU 上同时放 1.7B 学生 + 4B 教师 + AdamW 状态，约需 **30GB+ 显存**；
   小于 30GB 时脚本会跳过 B 并提示。
 - 评测成功后才删除权重；如果评测失败，checkpoint 会保留，可以手动重跑评测
@@ -73,7 +75,7 @@ free -g | head -2
 1. 创建 `/content/verl_env`（vLLM + verl + pins + FlashAttention）
 2. 下载 `Qwen3-1.7B` + `Qwen3-4B-Instruct-2507`
 3. 下载 DAPO-Math-17k（去重）、AIME24/25、AMC23 并转成 verl parquet
-4. A：on-policy FKL 60 步（lr 3e-6，batch 按 RAM）
+4. A：on-policy FKL 60 步（lr 3e-6，batch 按 RAM，rollout 最大生成 7168）
 5. B：固定轨迹 FKL 60 步（lr 3e-6，batch 64）
 6. 各自评测 benchmark + held-out RKL/FKL，然后删除权重
 
