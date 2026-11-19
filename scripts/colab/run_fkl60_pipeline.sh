@@ -223,9 +223,11 @@ if [ "$SKIP_ONPOLICY" != "1" ]; then
         echo ">>> [A] training/checkpoint FAILED"
         [ -n "${ON_TRAIN_LOG:-}" ] && tail -40 "$ON_TRAIN_LOG"
     fi
-    if [ "$KEEP_WEIGHTS" = "0" ] && [ -n "${ON_RUN:-}" ]; then
+    if [ "$KEEP_WEIGHTS" = "0" ] && [ "$ON_OK" = "1" ] && [ -n "${ON_RUN:-}" ]; then
         rm -rf "$ON_RUN"
         echo ">>> [A] weights deleted"
+    elif [ "$KEEP_WEIGHTS" = "0" ]; then
+        echo ">>> [A] eval not OK; keeping weights for a retry at ${ON_RUN:-<none>}"
     fi
 else
     echo ">>> SKIP_ONPOLICY=1"
@@ -273,9 +275,11 @@ if [ "$SKIP_FIXED" != "1" ]; then
         echo ">>> [B] training/checkpoint FAILED"
         tail -40 "$FIX_LOG"
     fi
-    if [ "$KEEP_WEIGHTS" = "0" ]; then
+    if [ "$KEEP_WEIGHTS" = "0" ] && [ "$FIX_OK" = "1" ]; then
         rm -rf "$FIX_CKPT"
         echo ">>> [B] weights deleted"
+    elif [ "$KEEP_WEIGHTS" = "0" ]; then
+        echo ">>> [B] eval not OK; keeping weights for a retry at $FIX_CKPT"
     fi
 else
     echo ">>> SKIP_FIXED=1"

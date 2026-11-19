@@ -8,7 +8,8 @@
 | A：正常 FKL | on-policy（当前学生在线采样） | 按 Colab RAM 自动选 16/8/4 | verl OPD，`loss_type=forward_kl`，全词表 FKL |
 | B：固定轨迹 FKL | 本地那 64 条固定轨迹 | 64 | `train_fixed_pool_position_mask_loss.py --all-positions --loss fkl` |
 
-两个 arm 都只保留最终 checkpoint，**评测完立即删除权重**（`KEEP_WEIGHTS=0` 默认）。
+两个 arm 都只保留最终 checkpoint，**评测成功后删除权重**（`KEEP_WEIGHTS=0` 默认；
+评测失败会保留 checkpoint 以便重试）。
 评测内容：
 
 - aime24 / aime25 / amc23，n=4，32k，**T=1.0，top_p=1.0，top_k=-1**，base tokenizer；
@@ -31,7 +32,8 @@
   `free -g` 自动选（≥60G→16，≥30G→8，否则 4）。高 RAM 的 A100 Colab 用 16。
 - B 需要在 GPU 上同时放 1.7B 学生 + 4B 教师 + AdamW 状态，约需 **30GB+ 显存**；
   小于 30GB 时脚本会跳过 B 并提示。
-- 权重删除后无法“只重跑评测”；需要保留权重时设 `KEEP_WEIGHTS=1`。
+- 评测成功后才删除权重；如果评测失败，checkpoint 会保留，可以手动重跑评测
+  （再次执行 Cell 3 会重新训练）。需要一直保留权重时设 `KEEP_WEIGHTS=1`。
 - Colab 内用官方 `huggingface.co`，不需要镜像；本地测试可用
   `HF_ENDPOINT=https://hf-mirror.com`。
 
