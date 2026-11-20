@@ -50,6 +50,8 @@ KEEP_WEIGHTS=${KEEP_WEIGHTS:-0}
 SKIP_ONPOLICY=${SKIP_ONPOLICY:-0}
 SKIP_FIXED=${SKIP_FIXED:-0}
 
+echo ">>> flags: SKIP_ONPOLICY=$SKIP_ONPOLICY SKIP_FIXED=$SKIP_FIXED SKIP_TRAIN=${SKIP_TRAIN:-<unset>} SKIP_EVAL=${SKIP_EVAL:-<unset>}"
+
 ON_RUN_ID=${ON_RUN_ID:-onfkl60}
 FIX_TAG=${FIX_TAG:-fixedfkl60}
 ON_EVAL_DIR="$OUTPUT_ROOT/eval/$ON_RUN_ID"
@@ -173,7 +175,10 @@ if [ "$SKIP_ONPOLICY" != "1" ]; then
     echo ">>> [A] on-policy FKL: $STEPS steps, batch $ONPOLICY_BATCH, lr $LEARNING_RATE"
     "$(dirname "$PYTHON")/ray" stop >/dev/null 2>&1 || true
 
+    SKIP_TRAIN=0 \
     SKIP_EVAL=1 \
+    ENTROPY_MASK="" \
+    ENTROPY_MASK_MARGIN=0.0 \
     MODEL_PATH="$MODEL_PATH" \
     TEACHER_MODEL_PATH="$TEACHER_MODEL_PATH" \
     DATA_DIR="$DATA_DIR" \

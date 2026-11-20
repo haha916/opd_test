@@ -133,6 +133,15 @@ REPO=/content/OPSD_OnPolicyDistillation
 bash "$REPO/scripts/colab/eval_fkl60_existing.sh"
 ```
 
+如果输出里 on-policy 的 run dir / checkpoint / 训练日志都是空的，说明 A **根本没启动**：
+
+- 确认没有设置 `SKIP_ONPOLICY=1`；
+- 旧 notebook 里残留的 `SKIP_TRAIN=1` 也会让 A 跳过训练（新版流水线已对 A 强制
+  `SKIP_TRAIN=0` 和 `ENTROPY_MASK=""`）。
+
+这种情况下先用 **Cell 6** 只训练 A（`export SKIP_FIXED=1`，**不要** export
+`SKIP_ONPOLICY=1`），训练完再回到 Cell 5 评测。
+
 ---
 
 ## Cell 6 — 只跑其中一个 arm

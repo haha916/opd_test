@@ -54,6 +54,18 @@ eval_arm() {
     local name=$1 ckpt=$2 out_dir=$3 tag=$4
     if [ ! -f "$ckpt/config.json" ]; then
         echo ">>> [$name] checkpoint missing: $ckpt"
+        local latest=""
+        if [ "$name" = "onpolicy" ]; then
+            latest=$(ls -t "$OUTPUT_ROOT"/logs/colab_qwen3_fkl_*.log 2>/dev/null | head -1)
+        else
+            latest=$(ls -t "$LOG_DIR"/fixed_fkl_train_*.log 2>/dev/null | head -1)
+        fi
+        if [ -n "$latest" ]; then
+            echo "--- tail $latest ---"
+            tail -40 "$latest"
+        else
+            echo ">>> [$name] no training log either; this arm probably never started."
+        fi
         return 1
     fi
     echo ">>> [$name] eval: $ckpt"
@@ -80,6 +92,14 @@ eval_arm() {
 }
 
 echo "=== re-evaluating existing FKL60 checkpoints (no training) ==="
+echo "on-policy run dirs:"
+find "$OUTPUT_ROOT" -maxdepth 1 -type d -name "*-${ON_RUN_ID}-OPD-forward_kl-*" -printf '  %p\n' 2>/dev/null | sort
+echo "on-policy checkpoints:"
+find "$OUTPUT_ROOT" -path "*-${ON_RUN_ID}-OPD-forward_kl-*" -name config.json -printf '  %p\n' 2>/dev/null | sort
+echo "on-policy logs:"
+ls -t "$OUTPUT_ROOT"/logs/colab_qwen3_fkl_*.log 2>/dev/null | head -3 | sed 's/^/  /'
+echo "fixed train dir:"
+ls -l "$FIX_TRAIN_DIR" 2>/dev/null | sed 's/^/  /'
 
 ON_RUN=$(find "$OUTPUT_ROOT" -maxdepth 1 -type d -name "*-${ON_RUN_ID}-OPD-forward_kl-*" \
     -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
