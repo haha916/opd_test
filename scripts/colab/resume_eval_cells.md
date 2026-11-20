@@ -1,41 +1,47 @@
-# Colab：60 步 FKL 对比（正常 on-policy FKL vs 固定轨迹 FKL）
+# Colab：60 步四臂 KL 对比（on-policy / 固定轨迹 × FKL / RKL）
 
-两个 arm，均训练 **60 步**、lr **3e-6**、学生 `Qwen3-1.7B`、教师
+四个 arm，均训练 **60 步**、lr **3e-6**、学生 `Qwen3-1.7B`、教师
 `Qwen3-4B-Instruct-2507`、非 thinking：
 
-| arm | 数据 | batch | 说明 |
+| arm | 数据 | batch | loss |
 |---|---|---|---|
-| A：正常 FKL | on-policy（当前学生在线采样） | 按 Colab RAM 自动选 16/8/4 | verl OPD，`loss_type=forward_kl`，全词表 FKL；rollout 最大生成 **7168** |
-| B：固定轨迹 FKL | 本地那 64 条固定轨迹 | 64 | `train_fixed_pool_position_mask_loss.py --all-positions --loss fkl` |
+| `onfkl` | on-policy（当前学生在线采样） | 按 Colab RAM 自动选 16/8/4 | 全词表 forward KL，`loss_type=forward_kl` |
+| `onrkl` | on-policy（当前学生在线采样） | 同上 | 全词表 reverse KL，`loss_type=reverse_kl` |
+| `fixedfkl` | 同一批 64 条固定轨迹 | 64 | `--loss fkl`（全词表 FKL） |
+| `fixedrkl` | 同一批 64 条固定轨迹 | 64 | `--loss rkl`（全词表 RKL） |
 
-两个 arm 都只保留最终 checkpoint，**评测成功后删除权重**（`KEEP_WEIGHTS=0` 默认；
-评测失败会保留 checkpoint 以便重试）。
-评测内容：
-
-- aime24 / aime25 / amc23，n=4，32k，**T=1.0，top_p=1.0，top_k=-1**，base tokenizer；
-- held-out 64 条（与固定池训练轨迹零重叠）的 **全词表 RKL / FKL**。
+- on-policy 的 rollout 最大生成长度统一为 **7168**（与固定轨迹生成上限一致）；
+  评测仍然生成到 32k。
+- 每个 arm 只保留最终 step-60 checkpoint；评测成功后删除权重，评测失败则保留。
+- 评测：aime24 / aime25 / amc23，n=4，32k，**T=1.0，top_p=1.0，top_k=-1**，
+  base tokenizer；外加 held-out 64 条（与固定池训练轨迹零重叠）的**全词表 RKL/FKL**。
 
 结果写在 Drive：
 
-- `outputs/fkl60_<日期>/result.json`：两个 arm 的 macro acc/pass、held-out RKL/FKL 降幅
-- `outputs/eval/onfkl60/`、`outputs/eval/fixedfkl60/`：各自的 `all_summary.json` /
-  `holdout_kl.json` / 日志
-- `outputs/logs/fkl60_*`、`onpolicy_fkl_*`、`fixed_fkl_*`：训练和评测日志
+- `outputs/kl60_<日期>/result.json`：四臂的 macro acc/pass、held-out RKL/FKL 降幅
+- `outputs/eval/{onfkl60,onrkl60,fixedfkl60,fixedrkl60}/`：各自的
+  `all_summary.json` / `holdout_kl.json` / 日志
+- `outputs/logs/colab_qwen3_kl_*`、`*_train_*`、`*_eval_*`：训练和评测日志
+
+**可续跑**：
+
+- 已经有 `all_summary.json + holdout_kl.json` 的 arm 直接跳过；
+- 已经有 `global_step_60`（on-policy）或 `step_0060`（fixed）的 arm，
+  只重评、不重训；
+- 之前的 FKL 两臂如果 checkpoint 还在 Drive 里，会被自动复用；
+- 每个 arm 互不阻塞，失败的 arm 保留权重，其余继续。
 
 注意：
 
 - **新运行时 `/content` 全部丢失**（代码、venv、模型、数据），Cell 3 会自动重建；
-  Drive 里的结果保留。setup 约 15–25 分钟。
-- 固定池的 64 条轨迹已经压缩成 `assets/fixed_pool/train_64.jsonl`（约 0.5MB，
-  只保留 `prompt_ids` / `response_ids`），随仓库一起上传，不需要另外下载。
-- A 的 full-vocab FKL 会把教师 logits 缓存在 **CPU RAM**：batch 由脚本按
-  `free -g` 自动选（≥60G→16，≥30G→8，否则 4）。高 RAM 的 A100 Colab 用 16。
-- A 的 rollout 最大生成长度为 **7168**（`TRAIN_RESPONSE_LENGTH=7168`），与固定轨迹
-  生成时的 7168 上限一致；评测仍然生成到 32k。
-- B 需要在 GPU 上同时放 1.7B 学生 + 4B 教师 + AdamW 状态，约需 **30GB+ 显存**；
-  小于 30GB 时脚本会跳过 B 并提示。
-- 评测成功后才删除权重；如果评测失败，checkpoint 会保留，可以手动重跑评测
-  （再次执行 Cell 3 会重新训练）。需要一直保留权重时设 `KEEP_WEIGHTS=1`。
+  Drive 里的 checkpoint/结果保留。setup 约 15–25 分钟。
+- on-policy 的 full-vocab KL 会把教师 logits 缓存在 **CPU RAM**：batch 由脚本按
+  `free -g` 自动选（≥60G→16，≥30G→8，否则 4）。高 RAM 的 A100 用 16。
+- 固定轨迹两臂需要在 GPU 上同时放 1.7B 学生 + 4B 教师 + AdamW 状态，约需
+  **30GB+ 显存**；小于 30GB 时自动跳过这两个 arm，on-policy 仍会跑。
+- **四臂可能超过单次 Colab 会话时长**。可以分两次跑：
+  第一次 `ARMS="onfkl fixedfkl"`，第二次 `ARMS="onrkl fixedrkl"`；
+  已完成的 arm 会自动跳过。
 - Colab 内用官方 `huggingface.co`，不需要镜像；本地测试可用
   `HF_ENDPOINT=https://hf-mirror.com`。
 
@@ -68,26 +74,25 @@ free -g | head -2
 
 ---
 
-## Cell 3 — 一键：setup + 两个 60 步 FKL arm + 评测 + 删权重
+## Cell 3 — 一键：setup + 四臂训练/评测
 
 首次（或新运行时）自动完成：
 
 1. 创建 `/content/verl_env`（vLLM + verl + pins + FlashAttention）
 2. 下载 `Qwen3-1.7B` + `Qwen3-4B-Instruct-2507`
 3. 下载 DAPO-Math-17k（去重）、AIME24/25、AMC23 并转成 verl parquet
-4. A：on-policy FKL 60 步（lr 3e-6，batch 按 RAM，rollout 最大生成 7168）
-5. B：固定轨迹 FKL 60 步（lr 3e-6，batch 64）
-6. 各自评测 benchmark + held-out RKL/FKL，然后删除权重
+4. 依次跑 `onfkl → onrkl → fixedfkl → fixedrkl`（或 `ARMS` 指定的子集）
+5. 每个 arm 评测 benchmark + held-out RKL/FKL，成功后删除权重
 
 可选覆盖（按需取消注释）：
 
 ```bash
-# export SKIP_FIXED=1          # 只跑 A（例如显存 <30GB）
-# export SKIP_ONPOLICY=1       # 只跑 B
+# export ARMS="onfkl fixedfkl"     # 只跑其中一部分（分两次可避开会话时长限制）
+# export ARMS="onrkl fixedrkl"
 # export STEPS=60
 # export ONPOLICY_BATCH=16
 # export FIXED_BATCH=64
-# export KEEP_WEIGHTS=1        # 保留权重（默认评测后删除）
+# export KEEP_WEIGHTS=1            # 保留权重（默认评测成功后删除）
 # export MODEL_PATH=/workspace/models/models/Qwen3-1.7B
 # export TEACHER_MODEL_PATH=/workspace/models/models/Qwen3-4B-Instruct-2507
 ```
@@ -96,72 +101,56 @@ free -g | head -2
 %%bash
 set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
-bash "$REPO/scripts/colab/run_fkl60_pipeline.sh"
+bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
 ```
 
 ---
 
-## Cell 4 — 查看结果（训练/评测结束后）
+## Cell 4 — 查看结果
 
 ```bash
 %%bash
 echo "== combined result =="
-cat /content/drive/MyDrive/outputs/fkl60_*/result.json 2>/dev/null | tail -80
+cat /content/drive/MyDrive/outputs/kl60_*/result.json 2>/dev/null | tail -100
 
 echo
 echo "== eval dirs =="
-for d in /content/drive/MyDrive/outputs/eval/onfkl60 /content/drive/MyDrive/outputs/eval/fixedfkl60; do
+for d in onfkl60 onrkl60 fixedfkl60 fixedrkl60; do
   echo "-- $d"
-  ls "$d" 2>/dev/null
+  ls "/content/drive/MyDrive/outputs/eval/$d" 2>/dev/null
 done
 ```
 
 ---
 
-## Cell 5 — 只重评已有 checkpoint（训练完成但评测失败时）
+## Cell 5 — 分两次跑（推荐，避免四臂超时）
 
-`run_fkl60_pipeline.sh` 在评测失败时会保留 checkpoint。这个 cell **不重新训练**，
-直接对 Drive 里已有的 on-policy step60 和 fixed step60 重跑完整评测，成功后删除权重。
-
-前提：当前 runtime 还有 `/content/models` 和 `/content/data`；新 runtime 先跑
-Cell 7 的 setup。
+第一次：
 
 ```bash
 %%bash
 set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
-bash "$REPO/scripts/colab/eval_fkl60_existing.sh"
+export ARMS="onfkl fixedfkl"
+bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
 ```
 
-如果输出里 on-policy 的 run dir / checkpoint / 训练日志都是空的，说明 A **根本没启动**：
-
-- 确认没有设置 `SKIP_ONPOLICY=1`；
-- 旧 notebook 里残留的 `SKIP_TRAIN=1` 也会让 A 跳过训练（新版流水线已对 A 强制
-  `SKIP_TRAIN=0` 和 `ENTROPY_MASK=""`）。
-
-这种情况下先用 **Cell 6** 只训练 A（`export SKIP_FIXED=1`，**不要** export
-`SKIP_ONPOLICY=1`），训练完再回到 Cell 5 评测。
-
----
-
-## Cell 6 — 只跑其中一个 arm
+第二次（新 runtime 也可以；Drive 里的结果会自动复用）：
 
 ```bash
 %%bash
 set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
-
-# 只跑 A（正常 on-policy FKL）
-export SKIP_FIXED=1
-# 只跑 B（固定轨迹 FKL）时改成：
-# export SKIP_ONPOLICY=1
-
-bash "$REPO/scripts/colab/run_fkl60_pipeline.sh"
+export ARMS="onrkl fixedrkl"
+bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
 ```
+
+中间断掉也没关系：重新跑同一个 `ARMS`，已完成的评测会跳过，已有 checkpoint
+会直接评测而不会重训。
 
 ---
 
-## Cell 7 — 可选：只准备环境（调试用）
+## Cell 6 — 可选：只准备环境（调试用）
 
 一键 cell 失败时，可以先单独确认环境/模型/数据是否就绪。这条不会训练。
 
@@ -181,17 +170,18 @@ PYTHON=/content/verl_env/bin/python \
 
 ---
 
-## Cell 8 — 可选：只验证 A 的 1 步（不评测）
+## Cell 7 — 可选：只验证 on-policy 的 1 步（不评测）
 
-如果担心 full-vocab FKL 在目标 GPU 上 OOM，先用 2 条 prompt 跑 1 步训练、
+如果担心 full-vocab KL 在目标 GPU 上 OOM，先用 2 条 prompt 跑 1 步训练、
 不评测、直接删权重。
 
 ```bash
 %%bash
 set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
+export SKIP_TRAIN=0
 export SKIP_EVAL=1
-export RUN_ID=onfkl-smoke
+export RUN_ID=kl-smoke
 export OPD_LOSS_TYPE=forward_kl
 export TOTAL_TRAINING_STEPS=1
 export OPD_DATA_STEPS=1
@@ -200,6 +190,7 @@ export PPO_MINI_BATCH_SIZE=2
 export PPO_MICRO_BATCH_SIZE_PER_GPU=1
 export SAVE_FREQ=1
 export MAX_ACTOR_CKPT_TO_KEEP=1
+export ENTROPY_MASK=""
 export MODEL_PATH=/content/models/Qwen3-1.7B
 export TEACHER_MODEL_PATH=/content/models/Qwen3-4B-Instruct-2507
 export OUTPUT_ROOT=/content/drive/MyDrive/outputs
@@ -207,7 +198,7 @@ export PYTHON=/content/verl_env/bin/python
 
 bash "$REPO/scripts/colab/run_qwen3_opd.sh"
 
-RUN_DIR=$(find "$OUTPUT_ROOT" -maxdepth 1 -type d -name "*-onfkl-smoke-OPD-forward_kl-*" | tail -1)
+RUN_DIR=$(find "$OUTPUT_ROOT" -maxdepth 1 -type d -name "*-kl-smoke-OPD-forward_kl-*" | tail -1)
 echo "smoke run dir: $RUN_DIR"
 rm -rf "$RUN_DIR"
 ```
