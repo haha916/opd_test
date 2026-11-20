@@ -190,6 +190,8 @@ def main():
         top_k=args.top_k,
         max_tokens=args.max_tokens,
         stop_token_ids=[151645, 151643],
+        # 0 = return the sampled token's log-prob (for the logp analysis).
+        logprobs=0,
     )
 
     all_metrics = {}
@@ -222,6 +224,7 @@ def main():
         n_boxed_total = 0
         n_trunc_total = 0
         n_samples_total = 0
+        logp_vals = []
 
         for qi, (q, req_out) in enumerate(zip(questions, outputs, strict=True)):
             samples = []
@@ -232,6 +235,18 @@ def main():
                 )
                 ntok = len(out.token_ids)
                 truncated = out.finish_reason == "length"
+                mean_logp = None
+                if out.logprobs:
+                    lp_vals = []
+                    for tid, step_lp in zip(out.token_ids, out.logprobs):
+                        if not step_lp:
+                            continue
+                        if tid in step_lp:
+                            lp_vals.append(step_lp[tid].logprob)
+                        else:
+                            lp_vals.append(next(iter(step_lp.values())).logprob)
+                    if lp_vals:
+                        mean_logp = sum(lp_vals) / len(lp_vals)
                 samples.append(
                     {
                         "index": q["index"],
@@ -242,6 +257,7 @@ def main():
                         "truncated": bool(truncated),
                         "tokens": ntok,
                         "finish_reason": out.finish_reason,
+                        "mean_logp": mean_logp,
                     }
                 )
                 rows.append(samples[-1])
@@ -250,6 +266,8 @@ def main():
                 n_boxed_total += int(boxed)
                 n_trunc_total += int(truncated)
                 n_samples_total += 1
+                if mean_logp is not None:
+                    logp_vals.append(mean_logp)
             per_question.append(
                 {
                     "index": q["index"],
@@ -280,6 +298,8 @@ def main():
             "boxed_rate": n_boxed_total / max(1, n_samples_total),
             "trunc_rate": n_trunc_total / max(1, n_samples_total),
             "avg_response_tokens": ntok_total / max(1, n_samples_total),
+            "avg_logp": (sum(logp_vals) / len(logp_vals)) if logp_vals else None,
+            "num_logp_samples": len(logp_vals),
             "gen_seconds": elapsed,
             "tokens_per_second": ntok_total / max(elapsed, 1e-9),
             "per_question": per_question,
@@ -313,6 +333,7 @@ def main():
                 "boxed_rate": m["boxed_rate"],
                 "trunc_rate": m["trunc_rate"],
                 "avg_response_tokens": m["avg_response_tokens"],
+                "avg_logp": m.get("avg_logp"),
             }
             for b, m in all_metrics.items()
         },

@@ -46,11 +46,13 @@ STEPS=${STEPS:-60}
 LEARNING_RATE=${LEARNING_RATE:-3e-6}
 FIXED_BATCH=${FIXED_BATCH:-64}
 KEEP_WEIGHTS=${KEEP_WEIGHTS:-0}
-ARMS=${ARMS:-"onfkl fixedfkl onrkl fixedrkl"}
+ARMS=${ARMS:-"base onfkl fixedfkl onrkl fixedrkl"}
+FORCE_ARMS=${FORCE_ARMS:-}
 
 LOG_DIR="$OUTPUT_ROOT/logs"
 mkdir -p "$LOG_DIR"
 echo ">>> arms: $ARMS"
+echo ">>> forced arms: ${FORCE_ARMS:-<none>}"
 echo ">>> flags: SKIP_TRAIN=${SKIP_TRAIN:-<unset>} SKIP_EVAL=${SKIP_EVAL:-<unset>} KEEP_WEIGHTS=$KEEP_WEIGHTS"
 
 # ---------------------------------------------------------------------------
@@ -166,6 +168,39 @@ eval_done() {
     [ -f "$1/all_summary.json" ] && [ -f "$1/holdout_kl.json" ]
 }
 
+is_forced() {
+    case " ${FORCE_ARMS} " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+run_base() {
+    local out_dir="$OUTPUT_ROOT/eval/base60"
+    if [ -f "$out_dir/all_summary.json" ] && ! is_forced base; then
+        echo ">>> [base] already evaluated; skip"
+        return 0
+    fi
+    mkdir -p "$out_dir"
+    echo ">>> [base] eval: $MODEL_PATH"
+    if "$PYTHON" -I "$REPO/scripts/eval/eval_ckpt_bench.py" \
+        --model-path "$MODEL_PATH" \
+        --tokenizer-path "$MODEL_PATH" \
+        --tag base_60_T1p1 \
+        --benchmarks aime24 aime25 amc23 \
+        --data-dir "$DATA_PROCESSED" \
+        --out-dir "$out_dir" \
+        --n 4 --max-tokens 32768 --max-model-len 34000 \
+        --temperature 1.0 --top-p 1.0 \
+        --gpu-memory-utilization 0.9 --max-num-seqs 12 \
+        --no-enable-thinking > "$LOG_DIR/base_eval_$(date +%m%d_%H%M).log" 2>&1; then
+        echo ">>> [base] eval done"
+        return 0
+    fi
+    echo ">>> [base] eval FAILED (see $LOG_DIR/base_eval_*.log)"
+    return 1
+}
+
 find_on_run() {
     local run_id=$1 loss=$2
     find "$OUTPUT_ROOT" -maxdepth 1 -type d -name "*-${run_id}-OPD-${loss}-*" \
@@ -197,9 +232,9 @@ eval_ckpt() {
 # On-policy arm
 # ---------------------------------------------------------------------------
 run_onpolicy() {
-    local label=$1 loss=$2 run_id=$3 out_root=$4 tag=$5
+    local label=$1 loss=$2 run_id=$3 out_root=$4 tag=$5 key=$6
     local out_dir="$OUTPUT_ROOT/eval/$out_root"
-    if eval_done "$out_dir"; then
+    if eval_done "$out_dir" && ! is_forced "$key"; then
         echo ">>> [$label] already evaluated; skip"
         return 0
     fi
@@ -208,9 +243,13 @@ run_onpolicy() {
     local run ckpt
     run=$(find_on_run "$run_id" "$loss")
     ckpt="${run:-/nonexistent}/global_step_${STEPS}/actor/huggingface"
-    if [ -f "$ckpt/config.json" ]; then
+    if [ -f "$ckpt/config.json" ] && ! is_forced "$key"; then
         echo ">>> [$label] existing checkpoint found; eval without retraining"
     else
+        if is_forced "$key" && [ -n "${run:-}" ]; then
+            echo ">>> [$label] forced retrain: removing $run"
+            rm -rf "$run"
+        fi
         echo ">>> [$label] train: $STEPS steps, loss=$loss, batch $ONPOLICY_BATCH"
         "$(dirname "$PYTHON")/ray" stop >/dev/null 2>&1 || true
         SKIP_TRAIN=0 \
@@ -269,18 +308,18 @@ run_onpolicy() {
 # Fixed-trajectory arm
 # ---------------------------------------------------------------------------
 run_fixed() {
-    local label=$1 loss=$2 root=$3 tag=$4
+    local label=$1 loss=$2 root=$3 tag=$4 key=$5
     local out_dir="$OUTPUT_ROOT/eval/$root"
     local train_dir="$OUTPUT_ROOT/$root/train"
     local ckpt="$train_dir/step_$(printf '%04d' "$STEPS")"
 
-    if eval_done "$out_dir"; then
+    if eval_done "$out_dir" && ! is_forced "$key"; then
         echo ">>> [$label] already evaluated; skip"
         return 0
     fi
     mkdir -p "$out_dir"
 
-    if [ -f "$ckpt/config.json" ]; then
+    if [ -f "$ckpt/config.json" ] && ! is_forced "$key"; then
         echo ">>> [$label] existing checkpoint found; eval without retraining"
     else
         echo ">>> [$label] train: $STEPS steps, loss=$loss, batch $FIXED_BATCH"
@@ -319,24 +358,26 @@ run_fixed() {
 # ---------------------------------------------------------------------------
 for arm in $ARMS; do
     case "$arm" in
+        base)
+            run_base ;;
         onfkl)
-            run_onpolicy "on-policy FKL" forward_kl onfkl60 onfkl60 onpolicy_fkl_60_T1p1 ;;
+            run_onpolicy "on-policy FKL" forward_kl onfkl60 onfkl60 onpolicy_fkl_60_T1p1 onfkl ;;
         onrkl)
-            run_onpolicy "on-policy RKL" reverse_kl onrkl60 onrkl60 onpolicy_rkl_60_T1p1 ;;
+            run_onpolicy "on-policy RKL" reverse_kl onrkl60 onrkl60 onpolicy_rkl_60_T1p1 onrkl ;;
         fixedfkl)
             if [ "$VRAM_GB" -lt 30 ]; then
                 echo ">>> [fixed FKL] skipped: GPU ${VRAM_GB}GB < 30GB"
             else
-                run_fixed "fixed FKL" fkl fixedfkl60 fixed_fkl_60_T1p1
+                run_fixed "fixed FKL" fkl fixedfkl60 fixed_fkl_60_T1p1 fixedfkl
             fi ;;
         fixedrkl)
             if [ "$VRAM_GB" -lt 30 ]; then
                 echo ">>> [fixed RKL] skipped: GPU ${VRAM_GB}GB < 30GB"
             else
-                run_fixed "fixed RKL" rkl fixedrkl60 fixed_rkl_60_T1p1
+                run_fixed "fixed RKL" rkl fixedrkl60 fixed_rkl_60_T1p1 fixedrkl
             fi ;;
         *)
-            echo ">>> unknown arm: $arm (expected onfkl/onrkl/fixedfkl/fixedrkl)" ;;
+            echo ">>> unknown arm: $arm (expected base/onfkl/onrkl/fixedfkl/fixedrkl)" ;;
     esac
 done
 
@@ -349,7 +390,7 @@ mkdir -p "$(dirname "$RESULT")"
 import json, os, sys
 
 result_path, eval_root = sys.argv[1:3]
-ARMS = [("onfkl", "onfkl60"), ("onrkl", "onrkl60"),
+ARMS = [("base", "base60"), ("onfkl", "onfkl60"), ("onrkl", "onrkl60"),
         ("fixedfkl", "fixedfkl60"), ("fixedrkl", "fixedrkl60")]
 
 def load(path):
@@ -396,5 +437,5 @@ cat "$RESULT"
 echo
 echo "=== KL60 pipeline finished ==="
 echo "result : $RESULT"
-echo "evals  : $OUTPUT_ROOT/eval/{onfkl60,onrkl60,fixedfkl60,fixedrkl60}"
+echo "evals  : $OUTPUT_ROOT/eval/{base60,onfkl60,onrkl60,fixedfkl60,fixedrkl60}"
 echo "logs   : $LOG_DIR"
