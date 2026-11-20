@@ -83,6 +83,11 @@ if [ -z "${ONPOLICY_BATCH:-}" ]; then
         ONPOLICY_BATCH=4
     fi
 fi
+# verl's agent loop has 8 workers and requires prompts.chunk(8) to divide
+# evenly; round the on-policy prompt batch up to a multiple of 8.
+if [ "$ONPOLICY_BATCH" -lt 8 ] || [ $((ONPOLICY_BATCH % 8)) -ne 0 ]; then
+    ONPOLICY_BATCH=$(( ((ONPOLICY_BATCH + 7) / 8) * 8 ))
+fi
 echo ">>> GPU ${VRAM_GB}GB | RAM ${RAM_GB}GB | on-policy batch $ONPOLICY_BATCH | fixed batch $FIXED_BATCH"
 if [ "$VRAM_GB" -lt 30 ]; then
     echo ">>> WARNING: fixed arms need ~30GB GPU (full AdamW on 1.7B); they will be skipped."

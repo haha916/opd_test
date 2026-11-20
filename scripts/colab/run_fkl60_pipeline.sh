@@ -88,6 +88,10 @@ if [ -z "${ONPOLICY_BATCH:-}" ]; then
         ONPOLICY_BATCH=4
     fi
 fi
+# verl's agent loop has 8 workers; the prompt batch must be a multiple of 8.
+if [ "$ONPOLICY_BATCH" -lt 8 ] || [ $((ONPOLICY_BATCH % 8)) -ne 0 ]; then
+    ONPOLICY_BATCH=$(( ((ONPOLICY_BATCH + 7) / 8) * 8 ))
+fi
 echo ">>> GPU ${VRAM_GB}GB | RAM ${RAM_GB}GB | on-policy batch $ONPOLICY_BATCH"
 if [ "$SKIP_FIXED" != "1" ] && [ "$VRAM_GB" -lt 30 ]; then
     echo ">>> WARNING: fixed-trajectory FKL needs ~30GB GPU (full AdamW on a 1.7B model); skipping it."

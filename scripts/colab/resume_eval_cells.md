@@ -72,6 +72,9 @@
 
 2. 先跑 **Cell 8** 的 1 步 smoke，确认 full-vocab 不再报 `zip()`；日志里应正常结束
    `OPD Training: 1/1`。
+   注意 smoke 用 **batch 8**：verl 的 agent loop 有 8 个 worker，要求 prompt batch
+   能被 8 整除；batch 2 会在 rollout 阶段报 `only support equal chunk`，与
+   full-vocab 无关。
 
 3. 跑剩余 arm（保存权重）：
 
@@ -274,8 +277,8 @@ export RUN_ID=kl-smoke
 export OPD_LOSS_TYPE=forward_kl
 export TOTAL_TRAINING_STEPS=1
 export OPD_DATA_STEPS=1
-export TRAIN_BATCH_SIZE=2
-export PPO_MINI_BATCH_SIZE=2
+export TRAIN_BATCH_SIZE=8
+export PPO_MINI_BATCH_SIZE=8
 export PPO_MICRO_BATCH_SIZE_PER_GPU=1
 export SAVE_FREQ=1
 export MAX_ACTOR_CKPT_TO_KEEP=1
