@@ -27,21 +27,25 @@
 - 汇总：`outputs/kl60_<日期>/result.json`
 - 分析：`outputs/kl60_<日期>/analysis/REPORT.md`
 
-**可续跑 / 强制重训**：
+**可续跑 / 重评 / 重训**：
 
 - 已有完整评测（`all_summary.json + holdout_kl.json`）的 arm 跳过；
 - 已有 step-60 checkpoint 的 arm 只重评、不重训；
-- `FORCE_ARMS="fixedfkl"` 忽略已有评测/checkpoint，强制重训该 arm
-  （旧 fixedfkl 权重已删、旧评测也没有 logp，所以这次需要 `FORCE_ARMS=fixedfkl`
-  重训一次）；
-- `FORCE_ARMS="base"` 可重跑 base 评测；
+- `REEVAL_ARMS="fixedfkl"`：忽略已有评测，对**已有 checkpoint** 重跑评测、不重训。
+  这正是旧 fixedfkl 评测没有 logp 时需要的（旧 summary 被 `--resume` 复用了）；
+- `FORCE_ARMS="fixedfkl"`：忽略已有评测和 checkpoint，强制重训（只有权重被删了才需要）；
+- `REEVAL_ARMS="base"` / `FORCE_ARMS="base"` 对 base 同理；
+- 评测现在强制 `--no-resume`，不会再复用旧 summary；
 - 每个 arm 评测成功后才删权重；`KEEP_WEIGHTS=1` 时永远保留。
 
 **时间**：完整五个对象可能超过单次 Colab 会话。推荐分两次训练 + 一次分析：
 
-1. `ARMS="base onfkl fixedfkl"`，`FORCE_ARMS=fixedfkl`，`KEEP_WEIGHTS=1`
+1. `ARMS="base onfkl fixedfkl"`，`REEVAL_ARMS="fixedfkl"`，`KEEP_WEIGHTS=1`
 2. `ARMS="onrkl fixedrkl"`，`KEEP_WEIGHTS=1`
 3. 分析 cell
+
+如果 fixedfkl 的 checkpoint 已经被删，把上面的 `REEVAL_ARMS` 换成
+`FORCE_ARMS="fixedfkl"` 重训一次。
 
 ---
 
@@ -83,7 +87,7 @@ REPO=/content/OPSD_OnPolicyDistillation
 
 export KEEP_WEIGHTS=1
 export ARMS="base onfkl fixedfkl"
-export FORCE_ARMS="fixedfkl"     # 旧 fixedfkl 权重已删、旧评测没有 logp
+export REEVAL_ARMS="fixedfkl"    # 对已有 checkpoint 重评；没有权重时会自动训练
 # export ONPOLICY_BATCH=16       # 默认按 RAM 自动选
 # export MODEL_PATH=/workspace/models/models/Qwen3-1.7B
 # export TEACHER_MODEL_PATH=/workspace/models/models/Qwen3-4B-Instruct-2507
@@ -96,7 +100,7 @@ bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
 1. 创建 `/content/verl_env`、下载 Qwen3-1.7B + Qwen3-4B-Instruct-2507、准备 DAPO/AIME/AMC 数据；
 2. 评 base（只做 benchmark，不做 held-out）；
 3. 训练 on-policy FKL 60 步；
-4. 强制重训 fixed FKL 60 步（带 logp 的新评测）；
+4. 重评 fixed FKL 60 步（新评测带 logp；如果权重已删会自动重训）；
 5. 每个训练臂评测 benchmark + held-out RKL/FKL，权重保留。
 
 ---
@@ -116,6 +120,32 @@ export ARMS="onrkl fixedrkl"
 
 bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
 ```
+
+---
+
+## Cell 4b — 如果已经跑过上一版（on-policy 报 zip 错 / fixedfkl 的 logp 为 null）
+
+上一版有两个问题：full-vocab 的教师缓存分支缺失导致 `forward_kl`/`reverse_kl` 在
+step 1 报 `zip() argument 2 is shorter`；fixedfkl 的 benchmark summary 被
+`--resume` 复用，所以 `avg_logp=null`。新版已修（`--no-resume` + 恢复分支）。
+
+拉最新代码后跑这个 cell：fixedfkl 用已有 checkpoint 重评（不重训），on-policy
+两个 arm 重新训练，fixedrkl 训练。
+
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+
+export KEEP_WEIGHTS=1
+export ARMS="fixedfkl onfkl onrkl fixedrkl"   # base 已完成，会自动跳过
+export REEVAL_ARMS="fixedfkl"                 # 只重评，不重训
+
+bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
+```
+
+如果 fixedfkl 的权重当时被删了（`KEEP_WEIGHTS=0`），把 `REEVAL_ARMS` 换成
+`FORCE_ARMS="fixedfkl"`，它会重训一次。
 
 ---
 

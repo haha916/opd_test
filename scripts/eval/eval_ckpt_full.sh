@@ -101,7 +101,7 @@ fi
   --n "$N" --max-tokens "$MAXTOK" --max-model-len "$MAXLEN" \
   --temperature 1.0 --top-p 1.0 \
   --gpu-memory-utilization 0.9 --max-num-seqs 12 \
-  --no-enable-thinking > "$OUT/benchmark_eval.log" 2>&1
+  --no-enable-thinking --no-resume > "$OUT/benchmark_eval.log" 2>&1
 RC=$?
 
 wait "$HP"

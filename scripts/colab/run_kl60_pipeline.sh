@@ -48,11 +48,12 @@ FIXED_BATCH=${FIXED_BATCH:-64}
 KEEP_WEIGHTS=${KEEP_WEIGHTS:-0}
 ARMS=${ARMS:-"base onfkl fixedfkl onrkl fixedrkl"}
 FORCE_ARMS=${FORCE_ARMS:-}
+REEVAL_ARMS=${REEVAL_ARMS:-}
 
 LOG_DIR="$OUTPUT_ROOT/logs"
 mkdir -p "$LOG_DIR"
 echo ">>> arms: $ARMS"
-echo ">>> forced arms: ${FORCE_ARMS:-<none>}"
+echo ">>> forced arms: ${FORCE_ARMS:-<none>} | re-eval arms: ${REEVAL_ARMS:-<none>}"
 echo ">>> flags: SKIP_TRAIN=${SKIP_TRAIN:-<unset>} SKIP_EVAL=${SKIP_EVAL:-<unset>} KEEP_WEIGHTS=$KEEP_WEIGHTS"
 
 # ---------------------------------------------------------------------------
@@ -175,9 +176,16 @@ is_forced() {
     esac
 }
 
+is_reeval() {
+    case " ${REEVAL_ARMS} " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 run_base() {
     local out_dir="$OUTPUT_ROOT/eval/base60"
-    if [ -f "$out_dir/all_summary.json" ] && ! is_forced base; then
+    if [ -f "$out_dir/all_summary.json" ] && ! is_forced base && ! is_reeval base; then
         echo ">>> [base] already evaluated; skip"
         return 0
     fi
@@ -193,7 +201,7 @@ run_base() {
         --n 4 --max-tokens 32768 --max-model-len 34000 \
         --temperature 1.0 --top-p 1.0 \
         --gpu-memory-utilization 0.9 --max-num-seqs 12 \
-        --no-enable-thinking > "$LOG_DIR/base_eval_$(date +%m%d_%H%M).log" 2>&1; then
+        --no-enable-thinking --no-resume > "$LOG_DIR/base_eval_$(date +%m%d_%H%M).log" 2>&1; then
         echo ">>> [base] eval done"
         return 0
     fi
@@ -234,7 +242,7 @@ eval_ckpt() {
 run_onpolicy() {
     local label=$1 loss=$2 run_id=$3 out_root=$4 tag=$5 key=$6
     local out_dir="$OUTPUT_ROOT/eval/$out_root"
-    if eval_done "$out_dir" && ! is_forced "$key"; then
+    if eval_done "$out_dir" && ! is_forced "$key" && ! is_reeval "$key"; then
         echo ">>> [$label] already evaluated; skip"
         return 0
     fi
@@ -313,7 +321,7 @@ run_fixed() {
     local train_dir="$OUTPUT_ROOT/$root/train"
     local ckpt="$train_dir/step_$(printf '%04d' "$STEPS")"
 
-    if eval_done "$out_dir" && ! is_forced "$key"; then
+    if eval_done "$out_dir" && ! is_forced "$key" && ! is_reeval "$key"; then
         echo ">>> [$label] already evaluated; skip"
         return 0
     fi

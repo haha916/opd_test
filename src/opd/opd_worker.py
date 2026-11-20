@@ -400,6 +400,26 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                     del teacher_logits, t_targets, teacher_info
                 elif sample_mode:
                     with torch.no_grad():
+                        # The token-logprob helpers always return (targets, logprobs, entropy);
+                        # the teacher only caches entropy when the position mask needs H_T.
+                        t_targets, t_logprobs, t_entropy = forward_fn(
+                            self.ref_module_fsdp, t_input_ids, t_attention_mask, t_position_ids,
+                            t_loss_mask, chunk_size=chunk_size,
+                            compute_entropy=compute_teacher_entropy,
+                        )
+                    logger.info("[OPD-MEM] phase1 micro_batch[%d]: cached teacher token logprobs shape=%s%s",
+                                i, list(t_logprobs.shape),
+                                ", with entropy" if compute_teacher_entropy else "")
+                    teacher_logits_cache.append(
+                        ((
+                            t_targets.to("cpu"),
+                            t_logprobs.float().to("cpu"),
+                            t_entropy.float().to("cpu") if compute_teacher_entropy else None,
+                        ), True)
+                    )
+                    del t_targets, t_logprobs, t_entropy
+                else:
+                    with torch.no_grad():
                         teacher_logits = forward_fn(
                             self.ref_module_fsdp, t_input_ids, t_attention_mask, t_position_ids, t_loss_mask
                         )
