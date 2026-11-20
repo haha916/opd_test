@@ -49,6 +49,58 @@
 
 ---
 
+## 现在怎么继续（已经跑过上一版，2026-11-20）
+
+当前状态：
+
+- `base` 已完成（macro acc 22.22%）；
+- `fixedfkl` 已训练、held-out 已算（RKL −16.7%、FKL −56.3%），但 benchmark summary 是旧
+  `--resume` 复用的、`avg_logp=null`，需要重评；
+- `onfkl` 在 step 1 报 `zip() argument 2 is shorter`（full-vocab 分支回归，已在
+  `054f6a1` 修复）；
+- `onrkl` / `fixedrkl` 尚未跑。
+
+按下面顺序：
+
+1. 拉最新代码（新 runtime 先 Cell 1/2）：
+
+   ```bash
+   %%bash
+   git -C /content/OPSD_OnPolicyDistillation pull --ff-only
+   git -C /content/OPSD_OnPolicyDistillation log --oneline -1
+   ```
+
+2. 先跑 **Cell 8** 的 1 步 smoke，确认 full-vocab 不再报 `zip()`；日志里应正常结束
+   `OPD Training: 1/1`。
+
+3. 跑剩余 arm（保存权重）：
+
+   ```bash
+   %%bash
+   set -uo pipefail
+   REPO=/content/OPSD_OnPolicyDistillation
+
+   export KEEP_WEIGHTS=1
+   export ARMS="fixedfkl onfkl onrkl fixedrkl"
+   export REEVAL_ARMS="fixedfkl"
+
+   bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
+   ```
+
+   - fixedfkl 权重还在 → `REEVAL_ARMS="fixedfkl"`（只重评、不重训）；
+   - 权重被删了 → 换成 `FORCE_ARMS="fixedfkl"`；
+   - 时间不够就分两次：
+     `ARMS="fixedfkl onfkl" REEVAL_ARMS="fixedfkl" KEEP_WEIGHTS=1`，
+     然后 `ARMS="onrkl fixedrkl" KEEP_WEIGHTS=1`；
+   - 中途断了重跑同一组，已完成的评测会跳过，已有 checkpoint 只重评。
+
+4. 四个训练臂都完成后，跑 **Cell 6** 的分析，生成
+   `outputs/kl60_analysis/REPORT.md`（修复数 + 长度/logp/终止/答案率）。
+
+> 之前 `result.json` 里的 fixedfkl 53.26% 是旧 summary；这次重评会刷新。
+
+---
+
 ## Cell 1 — 挂载 Drive
 
 ```python
@@ -120,32 +172,6 @@ export ARMS="onrkl fixedrkl"
 
 bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
 ```
-
----
-
-## Cell 4b — 如果已经跑过上一版（on-policy 报 zip 错 / fixedfkl 的 logp 为 null）
-
-上一版有两个问题：full-vocab 的教师缓存分支缺失导致 `forward_kl`/`reverse_kl` 在
-step 1 报 `zip() argument 2 is shorter`；fixedfkl 的 benchmark summary 被
-`--resume` 复用，所以 `avg_logp=null`。新版已修（`--no-resume` + 恢复分支）。
-
-拉最新代码后跑这个 cell：fixedfkl 用已有 checkpoint 重评（不重训），on-policy
-两个 arm 重新训练，fixedrkl 训练。
-
-```bash
-%%bash
-set -uo pipefail
-REPO=/content/OPSD_OnPolicyDistillation
-
-export KEEP_WEIGHTS=1
-export ARMS="fixedfkl onfkl onrkl fixedrkl"   # base 已完成，会自动跳过
-export REEVAL_ARMS="fixedfkl"                 # 只重评，不重训
-
-bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
-```
-
-如果 fixedfkl 的权重当时被删了（`KEEP_WEIGHTS=0`），把 `REEVAL_ARMS` 换成
-`FORCE_ARMS="fixedfkl"`，它会重训一次。
 
 ---
 
