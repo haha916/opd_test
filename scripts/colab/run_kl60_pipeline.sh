@@ -217,6 +217,7 @@ run_onpolicy() {
         SKIP_EVAL=1 \
         ENTROPY_MASK="" \
         ENTROPY_MASK_MARGIN=0.0 \
+        ATTN_IMPL="" \
         MODEL_PATH="$MODEL_PATH" \
         TEACHER_MODEL_PATH="$TEACHER_MODEL_PATH" \
         DATA_DIR="$DATA_DIR" \

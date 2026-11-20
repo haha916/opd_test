@@ -316,7 +316,7 @@ python -m opd.main_opd \
     data.truncation=left \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.model.use_remove_padding=$use_remove_padding \
-    ${attn_impl:+"actor_rollout_ref.model.override_config.attn_implementation=$attn_impl"} \
+    ${attn_impl:+"+actor_rollout_ref.model.override_config.attn_implementation=$attn_impl"} \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=$learning_rate \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
