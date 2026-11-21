@@ -243,16 +243,22 @@ done
    （`fixedfkl` / `fixedrkl`），因为它们是在这批轨迹上训练的；
 2. **教师评测集轨迹**（aime24/25/amc23，教师生成）——四个臂都看。
 
-两部分都按同一口径统计：`p_T(v) >= 1%` 且 base `p_S(v) < 1%` 的 token，
-训练后 `p_S(v) >= 1%` 记为修复。每个臂给四种修复率：
+两部分都按同一口径统计：
 
-- `token 平均`（micro）：修复 token 数 / 未覆盖 token 数；
-- `轨迹平均`（macro）：每条轨迹算一个修复率，再对轨迹等权平均；
-- `位置平均`（macro）：每个位置算一个修复率，再对位置等权平均；
-- `教师加权`：`sum(p_T * repaired) / sum(p_T * low)`。
+- 候选 token：`p_T(y) > 1%` 且 `p_base(y) < 1%`；
+- 修复判据：`abs`（`p_after >= 1%`）、`>=50% p_T`（`p_after >= 0.5*p_T`）、
+  `>=90% p_T`（`p_after >= 0.9*p_T`）；
+- 三种平均：`T` = token 等权（所有候选 token 同权池化）、
+  `Q` = 轨迹等权（先算每条轨迹的修复率，再对轨迹平均）、
+  `W` = teacher 概率加权（权重 `p_T(y)`）。
 
-最后是四种方法在 aime24/25/amc23 上的输出长度、`mean_logp`、
-`finish_reason`/截断、`boxed` 与 accuracy（读已有 `eval/*60/*.jsonl`）。
+报告表按方法一行，列是 `abs T/Q/W`、`≥50% p_T T/Q/W`、`≥90% p_T T/Q/W`，
+并附 `broken(τ=1%)`；有 FKL/RKL 成对臂时再给 `FKL−RKL` 的 pp 差
+（`--delta-pairs A:B`，例如 `off-FKL100:off-RKL100`）。
+
+最后是四种方法在 aime24/25/amc23 上的输出长度、`cross-logp`、`self-logp (H)`、
+无 `</think>`、`boxed after think`、`parseable boxed`、`final boxed` 与 `acc`
+（读已有 `eval/*60/*.jsonl`；`cross_logp`/`corrected_correct` 字段存在时会自动使用）。
 
 #### 6a — 生成教师评测集轨迹（只需跑一次，GPU）
 
@@ -306,6 +312,17 @@ PY=/content/verl_env/bin/python
 - 只跑 support：加 `--skip-generation`；只跑生成行为：加 `--skip-support`。
 - 某个臂的 checkpoint 缺失时，报告仍会生成，并在该 section 明确列出
   **缺失臂**，不会再静默少一行。
+- 用其他命名的臂（例如 100 步的 off/on FKL/RKL）时，用显式 `--models` 并配
+  `--train-arms/--teacher-eval-arms/--delta-pairs`，例如：
+
+  ```bash
+  --models base=/content/models/Qwen3-1.7B \
+           off-RKL100=<ckpt> off-FKL100=<ckpt> \
+           on-RKL100=<ckpt>  on-FKL100=<ckpt> \
+  --train-arms off-FKL100 off-RKL100 \
+  --teacher-eval-arms off-RKL100 off-FKL100 on-RKL100 on-FKL100 \
+  --delta-pairs off-FKL100:off-RKL100 on-FKL100:on-RKL100
+  ```
 
 输出：
 

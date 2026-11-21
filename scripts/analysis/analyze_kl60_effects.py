@@ -122,26 +122,32 @@ def discover_models(output_root, steps, base_model):
     return models
 
 
+CRITERIA = ("abs", "rel50", "rel90")
+CRITERION_LABELS = {
+    "abs": "abs",
+    "rel50": "≥50% p_T",
+    "rel90": "≥90% p_T",
+}
+
+
 def _new_acc():
     return {
         "trajectories": 0,
         "positions": 0,
         "support_tokens": 0,
         "low_base_tokens": 0,
-        "repaired_tokens": 0,
         "newly_broken_tokens": 0,
         "mass_support": 0.0,
         "mass_low_base": 0.0,
-        "mass_repaired_teacher": 0.0,
         "mass_recovered": 0.0,
         "cov_support_base": 0.0,
         "cov_support_arm": 0.0,
         "top1_ps_base": 0.0,
         "top1_ps_arm": 0.0,
-        "traj_rate_sum": 0.0,
-        "traj_rate_count": 0,
-        "pos_rate_sum": 0.0,
-        "pos_rate_count": 0,
+        "repairs": {
+            crit: {"t_num": 0, "q_sum": 0.0, "q_count": 0, "w_num": 0.0}
+            for crit in CRITERIA
+        },
         "topk_low_base_tokens": 0,
         "topk_repaired_tokens": 0,
         "topk_low_mass": 0.0,
@@ -152,7 +158,13 @@ def _new_acc():
 
 
 def support_stats(rows, teacher, students, arms, args):
-    """Teacher-forced support repair on one trajectory set."""
+    """Teacher-forced support repair on one trajectory set.
+
+    Candidate: p_T > tau_T and base p_S < tau_S.
+    Repair: abs (p_after >= tau_S), rel50 (p_after >= 0.5*p_T),
+    rel90 (p_after >= 0.9*p_T).  Each criterion is reported under T (token),
+    Q (trajectory) and W (teacher probability) averaging.
+    """
     tau_t = args.tau_teacher
     tau_s = args.tau_student
     topk = args.topk
@@ -167,7 +179,9 @@ def support_stats(rows, teacher, students, arms, args):
             resp = row["response_ids"][: args.max_response]
             rr = len(resp)
             traj_low = {name: 0 for name in arms}
-            traj_rep = {name: 0 for name in arms}
+            traj_rep = {
+                name: {crit: 0 for crit in CRITERIA} for name in arms
+            }
             for s0 in range(0, rr, seg):
                 s1 = min(rr, s0 + seg)
                 L = s1 - s0
@@ -184,10 +198,12 @@ def support_stats(rows, teacher, students, arms, args):
                     b_lp = F.log_softmax(ls["base"][c0:c1].float(), dim=-1)
                     b_p = b_lp.exp()
 
-                    support = t_p >= tau_t
+                    # 口径：p_T(y) > 1% 且 p_base(y) < 1%
+                    support = t_p > tau_t
                     low = support & (b_p < tau_s)
                     support_mass = (t_p * support).sum(-1)
                     low_mass = (t_p * low).sum(-1)
+                    low_tokens = int(low.sum().item())
 
                     topk_p, topk_i = t_p.topk(topk, dim=-1)
                     b_topk = b_p.gather(-1, topk_i)
@@ -204,30 +220,24 @@ def support_stats(rows, teacher, students, arms, args):
                         a_topk = a_p.gather(-1, topk_i)
                         a_top1 = a_p.gather(-1, top1_i).squeeze(-1)
 
-                        repaired = low & (a_p >= tau_s)
+                        # 三种修复判据
+                        criteria = {
+                            "abs": a_p >= tau_s,
+                            "rel50": a_p >= 0.5 * t_p,
+                            "rel90": a_p >= 0.9 * t_p,
+                        }
                         newly = support & (b_p >= tau_s) & (a_p < tau_s)
                         recovered = ((a_p - b_p).clamp_min(0.0) * low).sum(-1)
                         topk_repaired = topk_low & (a_topk >= tau_s)
 
-                        low_pos = low.sum(-1).float()
-                        rep_pos = repaired.sum(-1).float()
-                        valid = low_pos > 0
+                        traj_low[name] += low_tokens
                         a = acc[name]
-                        if valid.any():
-                            a["pos_rate_sum"] += float((rep_pos[valid] / low_pos[valid]).sum().item())
-                            a["pos_rate_count"] += int(valid.sum().item())
-
-                        traj_low[name] += int(low.sum().item())
-                        traj_rep[name] += int(repaired.sum().item())
-
                         a["positions"] += (c1 - c0)
                         a["support_tokens"] += int(support.sum().item())
-                        a["low_base_tokens"] += int(low.sum().item())
-                        a["repaired_tokens"] += int(repaired.sum().item())
+                        a["low_base_tokens"] += low_tokens
                         a["newly_broken_tokens"] += int(newly.sum().item())
                         a["mass_support"] += float(support_mass.sum().item())
                         a["mass_low_base"] += float(low_mass.sum().item())
-                        a["mass_repaired_teacher"] += float((t_p * repaired).sum().item())
                         a["mass_recovered"] += float(recovered.sum().item())
                         a["cov_support_base"] += float((b_p * support).sum().item())
                         a["cov_support_arm"] += float((a_p * support).sum().item())
@@ -241,28 +251,45 @@ def support_stats(rows, teacher, students, arms, args):
                         )
                         a["topk_cov_base"] += float(b_topk.sum().item())
                         a["topk_cov_arm"] += float(a_topk.sum().item())
-                        del a_lp, a_p, a_topk, a_top1, repaired, newly, recovered
-                        del topk_repaired, low_pos, rep_pos, valid
+
+                        for crit, cond in criteria.items():
+                            rep = low & cond
+                            r = a["repairs"][crit]
+                            n_rep = int(rep.sum().item())
+                            r["t_num"] += n_rep
+                            r["w_num"] += float((t_p * rep).sum().item())
+                            traj_rep[name][crit] += n_rep
+                            del rep
+
+                        del a_lp, a_p, a_topk, a_top1, criteria, newly, recovered, topk_repaired
 
                     del t_lp, t_p, b_lp, b_p, support, low, topk_p, topk_i, b_topk, topk_low
                 del lt, ls, ids
             for name in arms:
                 acc[name]["trajectories"] += 1
+                a = acc[name]
                 if traj_low[name] > 0:
-                    acc[name]["traj_rate_sum"] += traj_rep[name] / traj_low[name]
-                    acc[name]["traj_rate_count"] += 1
+                    for crit in CRITERIA:
+                        r = a["repairs"][crit]
+                        r["q_sum"] += traj_rep[name][crit] / traj_low[name]
+                        r["q_count"] += 1
             if (ti + 1) % 8 == 0:
                 log(f"support: {ti + 1}/{len(rows)} trajectories")
 
     for name in arms:
         a = acc[name]
         pos = max(1, a["positions"])
-        a["repaired_frac"] = a["repaired_tokens"] / max(1, a["low_base_tokens"])
-        a["traj_repaired_frac_mean"] = a["traj_rate_sum"] / max(1, a["traj_rate_count"])
-        a["pos_repaired_frac_mean"] = a["pos_rate_sum"] / max(1, a["pos_rate_count"])
-        a["teacher_weighted_repaired_frac"] = a["mass_repaired_teacher"] / max(
-            1e-12, a["mass_low_base"]
-        )
+        for crit in CRITERIA:
+            r = a["repairs"][crit]
+            r["T"] = r["t_num"] / max(1, a["low_base_tokens"])
+            r["Q"] = r["q_sum"] / max(1, r["q_count"])
+            r["W"] = r["w_num"] / max(1e-12, a["mass_low_base"])
+        # backward-compatible aliases for the abs criterion
+        a["repaired_tokens"] = a["repairs"]["abs"]["t_num"]
+        a["repaired_frac"] = a["repairs"]["abs"]["T"]
+        a["traj_repaired_frac_mean"] = a["repairs"]["abs"]["Q"]
+        a["teacher_weighted_repaired_frac"] = a["repairs"]["abs"]["W"]
+        a["mass_repaired_teacher"] = a["repairs"]["abs"]["w_num"]
         a["mass_recovered_frac"] = a["mass_recovered"] / max(1e-12, a["mass_low_base"])
         a["support_cov_base"] = a["cov_support_base"] / max(1e-12, a["mass_support"])
         a["support_cov_arm"] = a["cov_support_arm"] / max(1e-12, a["mass_support"])
@@ -338,8 +365,36 @@ def read_jsonl(paths):
     return rows
 
 
+def _boxed_finder():
+    import sys
+
+    sys.path.insert(0, str(REPO / "src"))
+    try:
+        from rewards.math_reward import last_boxed_only_string
+
+        return last_boxed_only_string
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _has_boxed(text, finder):
+    if finder is not None:
+        try:
+            return finder(text) is not None
+        except Exception:  # noqa: BLE001
+            pass
+    return "\\boxed{" in text
+
+
+def _after_last_think(text):
+    marker = "</think>"
+    idx = text.rfind(marker)
+    return text[idx + len(marker):] if idx >= 0 else ""
+
+
 def generation_analysis(eval_dirs):
     benches = ("aime24", "aime25", "amc23")
+    finder = _boxed_finder()
     out = {}
     for name, eval_dir in eval_dirs.items():
         per_bench = {}
@@ -349,15 +404,29 @@ def generation_analysis(eval_dirs):
                 continue
             lengths = [r["tokens"] for r in rows]
             logps = [r["mean_logp"] for r in rows if r.get("mean_logp") is not None]
+            cross = [
+                r.get("cross_logp", r.get("cross_logp_mean"))
+                for r in rows
+                if r.get("cross_logp") is not None or r.get("cross_logp_mean") is not None
+            ]
+            corrected = [r["corrected_correct"] for r in rows if "corrected_correct" in r]
+            texts = [r.get("text", "") for r in rows]
             finish = Counter(r.get("finish_reason", "?") for r in rows)
             n = len(rows)
+            no_think = sum("</think>" not in t for t in texts) / n
+            boxed_after = sum(_has_boxed(_after_last_think(t), finder) for t in texts) / n
             per_bench[bench] = {
                 "n": n,
                 "acc": sum(r["correct"] for r in rows) / n,
+                "acc_corrected": (sum(corrected) / len(corrected)) if corrected else None,
                 "boxed_rate": sum(r["boxed"] for r in rows) / n,
+                "parseable_boxed_rate": sum(r["boxed"] for r in rows) / n,
+                "boxed_after_think_rate": boxed_after,
+                "final_boxed_rate": boxed_after,
                 "boxed_not_trunc": sum(r["boxed"] and not r["truncated"] for r in rows) / n,
                 "trunc_rate": sum(r["truncated"] for r in rows) / n,
                 "stop_rate": finish.get("stop", 0) / n,
+                "no_think_close_rate": no_think,
                 "finish_reason": dict(finish),
                 "length_mean": float(np.mean(lengths)),
                 "length_median": float(np.median(lengths)),
@@ -365,21 +434,34 @@ def generation_analysis(eval_dirs):
                 "logp_mean": float(np.mean(logps)) if logps else None,
                 "logp_median": float(np.median(logps)) if logps else None,
                 "logp_samples": len(logps),
+                "cross_logp_mean": float(np.mean(cross)) if cross else None,
+                "cross_logp_samples": len(cross),
             }
         if per_bench:
+            keys = ("acc", "acc_corrected", "boxed_rate", "parseable_boxed_rate",
+                    "boxed_after_think_rate", "final_boxed_rate", "boxed_not_trunc",
+                    "trunc_rate", "stop_rate", "no_think_close_rate",
+                    "length_mean", "logp_mean", "cross_logp_mean")
             macro = {k: float(np.mean([per_bench[b][k] for b in per_bench]))
-                     for k in ("acc", "boxed_rate", "boxed_not_trunc", "trunc_rate",
-                               "stop_rate", "length_mean", "logp_mean")
+                     for k in keys
                      if all(per_bench[b][k] is not None for b in per_bench)}
             out[name] = {"per_bench": per_bench, "macro": macro}
     return out
 
 
 SECTION_TITLES = {
-    "train": "1. 学生 off-policy 训练轨迹（fixedfkl / fixedrkl）",
-    "teacher_eval": "2. 教师评测集轨迹（四个臂）",
-    "holdout": "3. 学生 held-out 轨迹（四个臂）",
+    "train": "第一部分：off-policy 训练轨迹",
+    "teacher_eval": "第二部分：teacher 评测轨迹",
+    "holdout": "held-out 轨迹",
 }
+
+
+def _fmt_tqw(r):
+    return f"{100*r['T']:.2f} / {100*r['Q']:.2f} / {100*r['W']:.2f}"
+
+
+def _pp(x):
+    return f"{100*x:+.2f}"
 
 
 def write_report(path, settings, support, generation):
@@ -387,65 +469,75 @@ def write_report(path, settings, support, generation):
     lines += [f"- {k}: {v}" for k, v in settings.items()]
     lines += [
         "",
-        "口径：位置 t 上的 token v 满足 `p_T(v) >= tau_T` 且 `base p_S(v) < tau_S` "
-        "记为 base 未覆盖；修复 = 训练后 `p_S(v) >= tau_S`。",
-        "修复率同时给出 token 平均（micro）、轨迹平均（每条轨迹等权）、"
-        "位置平均（每个位置等权）和教师加权平均（`sum(p_T*repaired)/sum(p_T*low)`）。",
+        "口径：",
+        "- 候选 token：`p_T(y) > tau_T` 且 `p_base(y) < tau_S`。",
+        "- 修复判据：`abs`（`p_after >= tau_S`）、`>=50% p_T`（`p_after >= 0.5*p_T`）、"
+        "`>=90% p_T`（`p_after >= 0.9*p_T`）。",
+        "- T = token 等权（所有候选 token 同权池化）；Q = 问题/轨迹等权"
+        "（先算每条轨迹的修复率，再对轨迹平均）；W = teacher 概率加权（权重 `p_T(y)`）。",
     ]
 
     for key, sec in support.items():
+        first = sec["stats"][sec["arms"][0]]
         lines += ["", f"## {SECTION_TITLES.get(key, key)}", ""]
         lines += [
             f"- data: {sec['data']}",
             f"- trajectories: {sec['n_trajectories']}",
+            f"- tokens: {first['positions']} (response tokens)",
             f"- arms: {', '.join(sec['arms'])}",
         ]
         if sec["missing_arms"]:
             lines += [f"- **缺失臂（未找到 checkpoint）**: {', '.join(sec['missing_arms'])}"]
         lines += [
+            f"- candidates: {first['low_base_tokens']}",
             "",
-            "| arm | base 未覆盖 token | 修复 token | token 修复率 | 轨迹平均 | 位置平均 | 教师加权 | 新破坏 | 净修复 | 学生质量恢复 | 支持集覆盖(base→arm) | pS(教师 top1) base→arm |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| method | abs T / Q / W | ≥50% p_T T / Q / W | ≥90% p_T T / Q / W | broken(τ=1%) |",
+            "|---|---:|---:|---:|---:|",
         ]
         for name in sec["arms"]:
             a = sec["stats"][name]
             lines.append(
-                f"| {name} | {a['low_base_tokens']} | {a['repaired_tokens']} | "
-                f"{100*a['repaired_frac']:.2f}% | "
-                f"{100*a['traj_repaired_frac_mean']:.2f}% | "
-                f"{100*a['pos_repaired_frac_mean']:.2f}% | "
-                f"{100*a['teacher_weighted_repaired_frac']:.2f}% | "
-                f"{a['newly_broken_tokens']} | "
-                f"{a['repaired_tokens']-a['newly_broken_tokens']} | "
-                f"{100*a['mass_recovered_frac']:.2f}% | "
-                f"{100*a['support_cov_base']:.2f}% → {100*a['support_cov_arm']:.2f}% | "
-                f"{a['top1_ps_base_mean']:.4f} → {a['top1_ps_arm_mean']:.4f} |"
+                f"| {name} | {_fmt_tqw(a['repairs']['abs'])} | "
+                f"{_fmt_tqw(a['repairs']['rel50'])} | "
+                f"{_fmt_tqw(a['repairs']['rel90'])} | "
+                f"{a['newly_broken_tokens']} |"
             )
-        lines += ["", f"teacher top-{settings['topk']} 口径：", "",
-                  "| arm | base 未覆盖 top-k token | 修复 | 修复率 | top-k 质量恢复 | top-k 覆盖 base→arm |",
-                  "|---|---:|---:|---:|---:|---:|"]
-        for name in sec["arms"]:
-            a = sec["stats"][name]
-            lines.append(
-                f"| {name} | {a['topk_low_base_tokens']} | {a['topk_repaired_tokens']} | "
-                f"{100*a['topk_repaired_frac']:.2f}% | {100*a['topk_mass_recovered_frac']:.2f}% | "
-                f"{a['topk_cov_base']:.4f} → {a['topk_cov_arm']:.4f} |"
-            )
+        for pair in settings.get("delta_pairs", []):
+            if ":" not in pair:
+                continue
+            left, right = pair.split(":", 1)
+            if left not in sec["stats"] or right not in sec["stats"]:
+                continue
+            parts = []
+            for crit in CRITERIA:
+                ra = sec["stats"][left]["repairs"][crit]
+                rb = sec["stats"][right]["repairs"][crit]
+                parts.append(
+                    f"{CRITERION_LABELS[crit]}: "
+                    f"{_pp(ra['T']-rb['T'])} / {_pp(ra['Q']-rb['Q'])} / {_pp(ra['W']-rb['W'])}"
+                )
+            lines.append(f"- **{left} − {right} (pp)**: " + "; ".join(parts) + ".")
 
-    lines += ["", "## 3. Generation effects（四种方法 + base）", "",
-              "| arm | macro acc | boxed | boxed & 未截断 | trunc | stop | 长度 mean | 长度 p90 | logp mean |",
+    lines += ["", "## 3. 输出长度、logp、终止行为、有效答案率", "",
+              "| method | length mean (median) | cross-logp | self-logp (H) | no `</think>` | boxed after think | parseable boxed | final boxed | acc |",
               "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for name, g in generation.items():
         m = g["macro"]
+        cross = m.get("cross_logp_mean")
+        acc_corr = m.get("acc_corrected")
+        acc_str = f"{100*m.get('acc', float('nan')):.2f}"
+        if acc_corr is not None:
+            acc_str += f" ({100*acc_corr:.2f} corr)"
         lines.append(
-            f"| {name} | {100*m.get('acc', float('nan')):.2f}% | "
-            f"{100*m.get('boxed_rate', float('nan')):.2f}% | "
-            f"{100*m.get('boxed_not_trunc', float('nan')):.2f}% | "
-            f"{100*m.get('trunc_rate', float('nan')):.2f}% | "
-            f"{100*m.get('stop_rate', float('nan')):.2f}% | "
-            f"{m.get('length_mean', float('nan')):.0f} | "
-            f"{m.get('length_p90', float('nan')):.0f} | "
-            f"{m.get('logp_mean') if m.get('logp_mean') is not None else 'NaN'} |"
+            f"| {name} | {m.get('length_mean', float('nan')):.0f} "
+            f"({m.get('length_median', float('nan')):.0f}) | "
+            f"{cross if cross is not None else 'NaN'} | "
+            f"{m.get('logp_mean') if m.get('logp_mean') is not None else 'NaN'} | "
+            f"{100*m.get('no_think_close_rate', float('nan')):.2f}% | "
+            f"{100*m.get('boxed_after_think_rate', float('nan')):.2f}% | "
+            f"{100*m.get('parseable_boxed_rate', float('nan')):.2f}% | "
+            f"{100*m.get('final_boxed_rate', float('nan')):.2f}% | "
+            f"{acc_str} |"
         )
 
     lines += ["", "## Per benchmark", ""]
@@ -506,6 +598,10 @@ def main():
         "--holdout-arms", nargs="+", default=list(ALL_ARMS),
         help="arms to evaluate on the optional held-out trajectories",
     )
+    ap.add_argument(
+        "--delta-pairs", nargs="+", default=None,
+        help="A:B pairs for FKL-RKL delta lines, e.g. fixedfkl:fixedrkl",
+    )
     ap.add_argument("--steps", type=int, default=60)
     ap.add_argument("--models", nargs="+", default=None,
                     help="explicit name=path pairs; default auto-discovery")
@@ -537,6 +633,14 @@ def main():
         models = discover_models(args.output_root, args.steps, args.base_model)
     log(f"models: {models}")
 
+    delta_pairs = args.delta_pairs
+    if delta_pairs is None:
+        delta_pairs = []
+        if "fixedfkl" in models and "fixedrkl" in models:
+            delta_pairs.append("fixedfkl:fixedrkl")
+        if "onfkl" in models and "onrkl" in models:
+            delta_pairs.append("onfkl:onrkl")
+
     settings = {
         "tau_teacher": args.tau_teacher,
         "tau_student": args.tau_student,
@@ -546,6 +650,7 @@ def main():
         "holdout_data": args.data or "<none>",
         "max_response": args.max_response,
         "steps": args.steps,
+        "delta_pairs": delta_pairs,
         "models": models,
     }
 
