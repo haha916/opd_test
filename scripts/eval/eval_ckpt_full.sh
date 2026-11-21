@@ -24,6 +24,8 @@
 #   --benchmarks "a b c"   default: aime24 aime25 amc23
 #   --n 4 --max-tokens 32768 --max-model-len 34000
 #   --threads 20           CPU threads for held-out KL
+#   --holdout-max-response 7168   truncate held-out responses for KL
+#   --enable-thinking      render benchmark prompts with Qwen thinking mode
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,6 +44,8 @@ N=4
 MAXTOK=32768
 MAXLEN=34000
 THREADS=20
+HOLDOUT_MAX_RESPONSE=7168
+THINK_FLAG="--no-enable-thinking"
 
 usage() {
   sed -n '2,26p' "$0"
@@ -63,6 +67,9 @@ while [ $# -gt 0 ]; do
     --max-tokens) MAXTOK="$2"; shift 2 ;;
     --max-model-len) MAXLEN="$2"; shift 2 ;;
     --threads) THREADS="$2"; shift 2 ;;
+    --holdout-max-response) HOLDOUT_MAX_RESPONSE="$2"; shift 2 ;;
+    --enable-thinking) THINK_FLAG="--enable-thinking"; shift ;;
+    --no-enable-thinking) THINK_FLAG="--no-enable-thinking"; shift ;;
     -h|--help) usage ;;
     *) echo "unknown arg: $1"; usage ;;
   esac
@@ -83,6 +90,7 @@ echo "[$(date '+%H:%M:%S')] held-out RKL/FKL (CPU, ${THREADS} threads) -> $OUT/h
   --teacher-path "$TEACHER" \
   --models "base=$BASE" "arm=$MODEL" \
   --base-name base --device cpu --threads "$THREADS" \
+  --max-response "$HOLDOUT_MAX_RESPONSE" \
   --out "$OUT/holdout_kl.json" > "$OUT/holdout_kl.log" 2>&1 &
 HP=$!
 
@@ -101,7 +109,7 @@ fi
   --n "$N" --max-tokens "$MAXTOK" --max-model-len "$MAXLEN" \
   --temperature 1.0 --top-p 1.0 \
   --gpu-memory-utilization 0.9 --max-num-seqs 12 \
-  --no-enable-thinking --no-resume > "$OUT/benchmark_eval.log" 2>&1
+  "$THINK_FLAG" --no-resume > "$OUT/benchmark_eval.log" 2>&1
 RC=$?
 
 wait "$HP"

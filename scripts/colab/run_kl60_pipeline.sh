@@ -55,11 +55,32 @@ ARMS=${ARMS:-"base onfkl fixedfkl onrkl fixedrkl"}
 FORCE_ARMS=${FORCE_ARMS:-}
 REEVAL_ARMS=${REEVAL_ARMS:-}
 
+STUDENT_ID=${STUDENT_ID:-Qwen/Qwen3-1.7B}
+TEACHER_ID=${TEACHER_ID:-Qwen/Qwen3-4B-Instruct-2507}
+ENABLE_THINKING=${ENABLE_THINKING:-False}
+TRAIN_RESPONSE_LENGTH=${TRAIN_RESPONSE_LENGTH:-7168}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-$TRAIN_RESPONSE_LENGTH}
+EVAL_RESPONSE_LENGTH=${EVAL_RESPONSE_LENGTH:-16382}
+TRAIN_DATA=${TRAIN_DATA:-$REPO/assets/fixed_pool/train_64.jsonl}
+TRAIN_SELECTED=${TRAIN_SELECTED:-$REPO/assets/fixed_pool/train_64_selected.json}
+HOLDOUT_DATA=${HOLDOUT_DATA:-$REPO/assets/fixed_pool/holdout_64.jsonl}
+HOLDOUT_SELECTED=${HOLDOUT_SELECTED:-$REPO/assets/fixed_pool/holdout_64_selected.json}
+FIXED_SEGMENT=${FIXED_SEGMENT:-}
+FIXED_CHUNK=${FIXED_CHUNK:-}
+ONPOLICY_GPU_MEM_UTIL=${ONPOLICY_GPU_MEM_UTIL:-0.5}
+
+THINK_FLAG="--no-enable-thinking"
+if [ "$ENABLE_THINKING" = "True" ]; then
+    THINK_FLAG="--enable-thinking"
+fi
+
 LOG_DIR="$OUTPUT_ROOT/logs"
 mkdir -p "$LOG_DIR"
 echo ">>> arms: $ARMS"
 echo ">>> forced arms: ${FORCE_ARMS:-<none>} | re-eval arms: ${REEVAL_ARMS:-<none>}"
 echo ">>> flags: SKIP_TRAIN=${SKIP_TRAIN:-<unset>} SKIP_EVAL=${SKIP_EVAL:-<unset>} KEEP_WEIGHTS=$KEEP_WEIGHTS SKIP_SETUP=$SKIP_SETUP"
+echo ">>> thinking: $ENABLE_THINKING ($THINK_FLAG) | train_resp=$TRAIN_RESPONSE_LENGTH max_resp=$MAX_RESPONSE_LENGTH"
+echo ">>> train data: $TRAIN_DATA | holdout: $HOLDOUT_DATA"
 
 # ---------------------------------------------------------------------------
 # Drive
@@ -149,10 +170,10 @@ else
 fi
 
 if [ "$need_models" = "1" ]; then
-    echo ">>> downloading Qwen3-1.7B student / Qwen3-4B-Instruct-2507 teacher"
+    echo ">>> downloading $STUDENT_ID student / $TEACHER_ID teacher"
     PYTHON="$VENV_DIR/bin/python" MODEL_ROOT="$MODEL_ROOT" \
-        STUDENT_ID=Qwen/Qwen3-1.7B \
-        TEACHER_ID=Qwen/Qwen3-4B-Instruct-2507 \
+        STUDENT_ID="$STUDENT_ID" \
+        TEACHER_ID="$TEACHER_ID" \
         STUDENT_DIR="$MODEL_PATH" TEACHER_DIR="$TEACHER_MODEL_PATH" \
         bash "$REPO/scripts/utils/download_qwen3_models.sh" || exit 1
 else
@@ -218,7 +239,7 @@ run_base() {
         --n 4 --max-tokens 32768 --max-model-len 34000 \
         --temperature 1.0 --top-p 1.0 \
         --gpu-memory-utilization 0.9 --max-num-seqs 12 \
-        --no-enable-thinking --no-resume > "$LOG_DIR/base_eval_$(date +%m%d_%H%M).log" 2>&1; then
+        "$THINK_FLAG" --no-resume > "$LOG_DIR/base_eval_$(date +%m%d_%H%M).log" 2>&1; then
         echo ">>> [base] eval done"
         return 0
     fi
@@ -242,9 +263,11 @@ eval_ckpt() {
         --base-model "$MODEL_PATH" \
         --teacher-path "$TEACHER_MODEL_PATH" \
         --data-dir "$DATA_PROCESSED" \
-        --holdout-data "$REPO/assets/fixed_pool/holdout_64.jsonl" \
-        --holdout-selected "$REPO/assets/fixed_pool/holdout_64_selected.json" \
+        --holdout-data "$HOLDOUT_DATA" \
+        --holdout-selected "$HOLDOUT_SELECTED" \
+        --holdout-max-response "$MAX_RESPONSE_LENGTH" \
         --n 4 --max-tokens 32768 --max-model-len 34000 \
+        "$THINK_FLAG" \
         > "$LOG_DIR/${label// /_}_eval_$(date +%m%d_%H%M).log" 2>&1; then
         echo ">>> [$label] eval done"
         return 0
@@ -300,9 +323,11 @@ run_onpolicy() {
         MAX_ACTOR_CKPT_TO_KEEP=1 \
         PLATEAU_ENABLE=False \
         TEST_FREQ=-1 \
-        ENABLE_THINKING=False \
-        TRAIN_RESPONSE_LENGTH=7168 \
-        GPU_MEM_UTIL=0.5 \
+        ENABLE_THINKING="$ENABLE_THINKING" \
+        TRAIN_RESPONSE_LENGTH="$TRAIN_RESPONSE_LENGTH" \
+        MAX_RESPONSE_LENGTH="$MAX_RESPONSE_LENGTH" \
+        EVAL_RESPONSE_LENGTH="$EVAL_RESPONSE_LENGTH" \
+        GPU_MEM_UTIL="$ONPOLICY_GPU_MEM_UTIL" \
         bash "$REPO/scripts/colab/run_qwen3_opd.sh"
         local rc=$?
         echo ">>> [$label] training rc=$rc"
@@ -351,12 +376,16 @@ run_fixed() {
         rm -rf "$train_dir"
         mkdir -p "$train_dir"
         local train_log="$LOG_DIR/${root}_train_$(date +%m%d_%H%M).log"
+        local extra=()
+        [ -n "$FIXED_SEGMENT" ] && extra+=(--segment "$FIXED_SEGMENT")
+        [ -n "$FIXED_CHUNK" ] && extra+=(--chunk "$FIXED_CHUNK")
         ATTN_IMPL="$ATTN_IMPL" "$PYTHON" "$REPO/scripts/analysis/train_fixed_pool_position_mask_loss.py" \
-            --data "$REPO/assets/fixed_pool/train_64.jsonl" \
-            --selected "$REPO/assets/fixed_pool/train_64_selected.json" \
+            --data "$TRAIN_DATA" \
+            --selected "$TRAIN_SELECTED" \
             --all-positions --loss "$loss" \
             --steps "$STEPS" --lr "$LEARNING_RATE" --batch-size "$FIXED_BATCH" \
             --model-path "$MODEL_PATH" --teacher-path "$TEACHER_MODEL_PATH" \
+            "${extra[@]}" \
             --out-dir "$train_dir" > "$train_log" 2>&1
         local rc=$?
         echo ">>> [$label] training rc=$rc (log: $train_log)"

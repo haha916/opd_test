@@ -17,6 +17,10 @@ Example:
     --benchmarks aime24 aime25 amc23 --n 1 \
     --max-tokens 32768 --max-model-len 34000 \
     --out /content/drive/MyDrive/outputs/teacher_eval_traj/teacher_eval_traj.jsonl
+
+Add --enable-thinking when the teacher is a Qwen3 thinking model; the prompts
+then use the thinking chat template and the saved response_ids contain the
+thinking tokens.
 """
 
 from __future__ import annotations
@@ -78,6 +82,7 @@ def main():
     p.add_argument("--max-num-seqs", type=int, default=16)
     p.add_argument("--limit-prompts", type=int, default=0, help="smoke: first N per bench")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--enable-thinking", action="store_true")
     p.add_argument("--force", action="store_true", help="overwrite an existing output")
     args = p.parse_args()
 
@@ -102,7 +107,7 @@ def main():
                 q["messages"],
                 tokenize=True,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                enable_thinking=args.enable_thinking,
             )
             prompts.append({"prompt_token_ids": list(ids)})
         bench_data[bench] = (questions, prompts)

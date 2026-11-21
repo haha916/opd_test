@@ -1,0 +1,210 @@
+[
+  {
+    "prompt_index": 81,
+    "source_index": 116,
+    "cluster": 0,
+    "cluster_size": 17,
+    "text": "In $\\triangle ABC$, let point $D$ be on $\\overline{BC}$ such that the perimeters of $\\triangle ADB$ and $\\triangle ADC$ are equal. Let point $E$ be on $\\overline{AC}$ such that the perimeters of $\\triangle BEA$ and $\\triangle BEC$ are equal. Let point $F$ be the intersection of $\\overline{AB}$ with ",
+    "messages": [
+      {
+        "content": "In $\\triangle ABC$, let point $D$ be on $\\overline{BC}$ such that the perimeters of $\\triangle ADB$ and $\\triangle ADC$ are equal. Let point $E$ be on $\\overline{AC}$ such that the perimeters of $\\triangle BEA$ and $\\triangle BEC$ are equal. Let point $F$ be the intersection of $\\overline{AB}$ with the line that passes through $C$ and the intersection of $\\overline{AD}$ and $\\overline{BE}$. Given that $BD = 10$, $CD = 2$, and $BF/FA = 3$, what is the perimeter of $\\triangle ABC$?\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 8,
+    "source_index": 463,
+    "cluster": 1,
+    "cluster_size": 4,
+    "text": "设数列 \\{a_n\\} 满足 a_1=1, a_n=\\df{1}{4a_{n-1}}+\\df{1}{n} (n\\geq2)，则 a_{100} 的值为__________.原始的答案是\\frac{m}{n}的形式，其中m、n是互质的。请给出最终m + n的值\n\nLet's think step by step and output the final answer within \\boxed{}.",
+    "messages": [
+      {
+        "content": "设数列 \\{a_n\\} 满足 a_1=1, a_n=\\df{1}{4a_{n-1}}+\\df{1}{n} (n\\geq2)，则 a_{100} 的值为__________.原始的答案是\\frac{m}{n}的形式，其中m、n是互质的。请给出最终m + n的值\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 13,
+    "source_index": 2423,
+    "cluster": 2,
+    "cluster_size": 19,
+    "text": "Find the sum of all positive integers $B$ such that $(111)_B = (aabbcc)_6$, where $a, b, c$ represent distinct base $6$ digits, with $a \\neq 0$.\n\nLet's think step by step and output the final answer within \\boxed{}.",
+    "messages": [
+      {
+        "content": "Find the sum of all positive integers $B$ such that $(111)_B = (aabbcc)_6$, where $a, b, c$ represent distinct base $6$ digits, with $a \\neq 0$.\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 50,
+    "source_index": 495,
+    "cluster": 3,
+    "cluster_size": 5,
+    "text": "A charity sells $140$ benefit tickets for a total of $＄2001$. Some tickets sell for full price (a whole dollar amount), and the rest sells for half price. How much money, in dollars, is raised by the full-price tickets? Please provide your answer as an integer.\n\nLet's think step by step and output t",
+    "messages": [
+      {
+        "content": "A charity sells $140$ benefit tickets for a total of $＄2001$. Some tickets sell for full price (a whole dollar amount), and the rest sells for half price. How much money, in dollars, is raised by the full-price tickets? Please provide your answer as an integer.\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 60,
+    "source_index": 4241,
+    "cluster": 4,
+    "cluster_size": 6,
+    "text": "What is the greatest three-digit positive integer $n$ for which the sum of the first $n$ positive integers is $\\underline{not}$ a divisor of the product of the first $n$ positive integers?\n\nLet's think step by step and output the final answer within \\boxed{}.",
+    "messages": [
+      {
+        "content": "What is the greatest three-digit positive integer $n$ for which the sum of the first $n$ positive integers is $\\underline{not}$ a divisor of the product of the first $n$ positive integers?\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 48,
+    "source_index": 332,
+    "cluster": 5,
+    "cluster_size": 3,
+    "text": "一个小镇上共有 2023 位居民，他们成立了一些互不相同的俱乐部 A_1, A_2, \\cdots, A_n，每个俱乐部至少一人，每个人可以在任意个不同的俱乐部内. 已知对于每个俱乐部 A_i，存在一个不在其中的居民 b_i，考虑所有 b_i 未加入的俱乐部，它们要么为 A_i，要么和 A_i 没有公共成员. 求该小镇上俱乐部个数的最大值.（程国根）\n\nLet's think step by step and output the final answer within \\boxed{}.",
+    "messages": [
+      {
+        "content": "一个小镇上共有 2023 位居民，他们成立了一些互不相同的俱乐部 A_1, A_2, \\cdots, A_n，每个俱乐部至少一人，每个人可以在任意个不同的俱乐部内. 已知对于每个俱乐部 A_i，存在一个不在其中的居民 b_i，考虑所有 b_i 未加入的俱乐部，它们要么为 A_i，要么和 A_i 没有公共成员. 求该小镇上俱乐部个数的最大值.（程国根）\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 120,
+    "source_index": 3701,
+    "cluster": 6,
+    "cluster_size": 5,
+    "text": "求 $\\sin ^{4} 10^{\\circ}+\\sin ^{4} 50^{\\circ}+\\sin ^{4} 70^{\\circ}$ 的值.原始的答案是\\frac{m}{n}的形式，其中m、n是互质的。请给出最终m + n的值\n\nLet's think step by step and output the final answer within \\boxed{}.",
+    "messages": [
+      {
+        "content": "求 $\\sin ^{4} 10^{\\circ}+\\sin ^{4} 50^{\\circ}+\\sin ^{4} 70^{\\circ}$ 的值.原始的答案是\\frac{m}{n}的形式，其中m、n是互质的。请给出最终m + n的值\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 85,
+    "source_index": 4784,
+    "cluster": 7,
+    "cluster_size": 10,
+    "text": "Let $E$ denote the set of all natural numbers $n$ such that $3 < n < 100$ and the set $\\{ 1, 2, 3, \\ldots , n\\}$ can be partitioned into $3$ subsets with equal sums. Find the number of elements of $E$.\n\nLet's think step by step and output the final answer within \\boxed{}.",
+    "messages": [
+      {
+        "content": "Let $E$ denote the set of all natural numbers $n$ such that $3 < n < 100$ and the set $\\{ 1, 2, 3, \\ldots , n\\}$ can be partitioned into $3$ subsets with equal sums. Find the number of elements of $E$.\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 55,
+    "source_index": 918,
+    "cluster": 8,
+    "cluster_size": 9,
+    "text": "Find the number of positive integers $n$ such that $\\sqrt{n} + \\sqrt{n + 1} < 11$.\n\nLet's think step by step and output the final answer within \\boxed{}.",
+    "messages": [
+      {
+        "content": "Find the number of positive integers $n$ such that $\\sqrt{n} + \\sqrt{n + 1} < 11$.\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 51,
+    "source_index": 1723,
+    "cluster": 9,
+    "cluster_size": 5,
+    "text": "Raashan, Sylvia, and Ted play the following game. Each starts with $＄$ $1$. A bell rings every $15$ seconds, at which time each of the players who currently have money simultaneously chooses one of the other two players independently and at random and gives $＄$ $1$ to that player. What is the probab",
+    "messages": [
+      {
+        "content": "Raashan, Sylvia, and Ted play the following game. Each starts with $＄$ $1$. A bell rings every $15$ seconds, at which time each of the players who currently have money simultaneously chooses one of the other two players independently and at random and gives $＄$ $1$ to that player. What is the probability that after the bell has rung $2019$ times, each player will have $＄$ $1$? Provide your answer as a fraction in simplest form, \\(\\frac{k}{m}\\), and then give the value of \\(k + m\\).\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 2,
+    "source_index": 3091,
+    "cluster": 10,
+    "cluster_size": 5,
+    "text": "Find the real roots of\n\\[\\frac{6 - x}{x^2 - 4} = 2 + \\frac{x}{x + 2}.\\]Enter the roots, separated by commas.The answer is in the form \frac{m}{n}, where gcd(m, n) = 1. Please provide the value of m + n.\n\nLet's think step by step and output the final answer within \\boxed{}.",
+    "messages": [
+      {
+        "content": "Find the real roots of\n\\[\\frac{6 - x}{x^2 - 4} = 2 + \\frac{x}{x + 2}.\\]Enter the roots, separated by commas.The answer is in the form \frac{m}{n}, where gcd(m, n) = 1. Please provide the value of m + n.\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 12,
+    "source_index": 4583,
+    "cluster": 11,
+    "cluster_size": 6,
+    "text": "Find the number of square units in the area of the triangle.\n\n[asy]size(125);\ndraw( (-10,-2) -- (2,10), Arrows);\ndraw( (0,-2)-- (0,10) ,Arrows);\ndraw( (5,0) -- (-10,0),Arrows);\n\nlabel(\"$l$\",(2,10), NE);\nlabel(\"$x$\", (5,0) , E);\nlabel(\"$y$\", (0,-2) , S);\nfilldraw( (-8,0) -- (0,8) -- (0,0) -- cycle, l",
+    "messages": [
+      {
+        "content": "Find the number of square units in the area of the triangle.\n\n[asy]size(125);\ndraw( (-10,-2) -- (2,10), Arrows);\ndraw( (0,-2)-- (0,10) ,Arrows);\ndraw( (5,0) -- (-10,0),Arrows);\n\nlabel(\"$l$\",(2,10), NE);\nlabel(\"$x$\", (5,0) , E);\nlabel(\"$y$\", (0,-2) , S);\nfilldraw( (-8,0) -- (0,8) -- (0,0) -- cycle, lightgray);\ndot( (-2, 6)); dot( (-6, 2)); label( \"(-2, 6)\", (-2, 6), W, fontsize(10)); label( \"(-6, 2)\", (-6, 2), W, fontsize(10));\n[/asy]\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 82,
+    "source_index": 1813,
+    "cluster": 12,
+    "cluster_size": 1,
+    "text": "Dan the dog spots Cate the cat 50 meters away. At that instant, Cate begins running away from Dan at 6 m/s, and Dan begins running toward Cate at 8 m/s. Both of them accelerate instantaneously and run in straight lines. Compute the number of seconds it takes for Dan to reach Cate.\n\nLet's think step ",
+    "messages": [
+      {
+        "content": "Dan the dog spots Cate the cat 50 meters away. At that instant, Cate begins running away from Dan at 6 m/s, and Dan begins running toward Cate at 8 m/s. Both of them accelerate instantaneously and run in straight lines. Compute the number of seconds it takes for Dan to reach Cate.\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 126,
+    "source_index": 738,
+    "cluster": 13,
+    "cluster_size": 13,
+    "text": "设正整数 $a, b, c, d$ 满足 $a>b>c>d$, 且\n$$\na b+b c+c a+d^{2} \\mid(a+b)(b+c)(c+a)\n$$\n求 $a b+b c+c a+d^{2}$ 的素因子个数的最小值。(素因子的个数计重数，如 12 的素因子个数为 3 )。\n\nLet's think step by step and output the final answer within \\boxed{}.",
+    "messages": [
+      {
+        "content": "设正整数 $a, b, c, d$ 满足 $a>b>c>d$, 且\n$$\na b+b c+c a+d^{2} \\mid(a+b)(b+c)(c+a)\n$$\n求 $a b+b c+c a+d^{2}$ 的素因子个数的最小值。(素因子的个数计重数，如 12 的素因子个数为 3 )。\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 102,
+    "source_index": 3244,
+    "cluster": 14,
+    "cluster_size": 9,
+    "text": "A box contains $5$ chips, numbered $1$, $2$, $3$, $4$, and $5$. Chips are drawn randomly one at a time without replacement until the sum of the values drawn exceeds $4$. Find the probability that $3$ draws are required. The original answer is in \\(\\frac{k}{m}\\) format, please give the value of k + m",
+    "messages": [
+      {
+        "content": "A box contains $5$ chips, numbered $1$, $2$, $3$, $4$, and $5$. Chips are drawn randomly one at a time without replacement until the sum of the values drawn exceeds $4$. Find the probability that $3$ draws are required. The original answer is in \\(\\frac{k}{m}\\) format, please give the value of k + m.\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  },
+  {
+    "prompt_index": 95,
+    "source_index": 2427,
+    "cluster": 15,
+    "cluster_size": 11,
+    "text": "Given that $-1 - 4\\sqrt{2}$ is a root of the equation \\[x^3 + ax^2 + bx + 31 = 0\\]and that $a$ and $b$ are rational numbers, compute $a.$\n\nLet's think step by step and output the final answer within \\boxed{}.",
+    "messages": [
+      {
+        "content": "Given that $-1 - 4\\sqrt{2}$ is a root of the equation \\[x^3 + ax^2 + bx + 31 = 0\\]and that $a$ and $b$ are rational numbers, compute $a.$\n\nLet's think step by step and output the final answer within \\boxed{}.",
+        "role": "user"
+      }
+    ]
+  }
+]
