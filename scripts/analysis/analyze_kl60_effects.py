@@ -683,13 +683,14 @@ def main():
     log(f"wrote {out_dir / 'REPORT.md'}")
     for key, sec in support.items():
         for name, a in sec["stats"].items():
-            log(
-                f"[{key}] {name}: repaired {a['repaired_tokens']}/{a['low_base_tokens']} "
-                f"(token {100*a['repaired_frac']:.2f}%, "
-                f"traj {100*a['traj_repaired_frac_mean']:.2f}%, "
-                f"pos {100*a['pos_repaired_frac_mean']:.2f}%, "
-                f"teacher-weighted {100*a['teacher_weighted_repaired_frac']:.2f}%)"
-            )
+            parts = []
+            for crit in CRITERIA:
+                r = a["repairs"][crit]
+                parts.append(
+                    f"{CRITERION_LABELS[crit]} T/Q/W "
+                    f"{100*r['T']:.2f}/{100*r['Q']:.2f}/{100*r['W']:.2f}"
+                )
+            log(f"[{key}] {name}: candidates={a['low_base_tokens']} " + " | ".join(parts))
     if generation:
         for name, g in generation.items():
             m = g["macro"]
