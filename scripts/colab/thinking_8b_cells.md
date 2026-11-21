@@ -2,8 +2,10 @@
 
 配置：学生 `Qwen/Qwen3-1.7B`，教师 `Qwen/Qwen3-8B`（base，支持 thinking），
 `ENABLE_THINKING=True`，四臂 `onfkl/onrkl/fixedfkl/fixedrkl`，默认 60 步。
-固定轨迹用 thinking 学生重新生成：16 个 query × 8 条，sample 0–3 train、4–7 holdout。
-输出到 `/content/drive/MyDrive/outputs_think8b`，不覆盖旧结果。
+固定轨迹用 thinking 学生重新生成：16 个 query × 16 条，然后用 **teacher 隐状态覆盖度**
+选 64 条 train + 64 条 **不相交** holdout（和旧 fixed pool 的
+`select_diverse_pool.py` 同一套做法）。输出到
+`/content/drive/MyDrive/outputs_think8b`，不覆盖旧结果。
 
 建议 80GB A100；40GB 很可能 OOM。OOM 时见 Cell 4 里的降配注释。
 
@@ -52,7 +54,10 @@ STUDENT_DIR="$MODEL_ROOT/Qwen3-1.7B" \
 TEACHER_DIR="$MODEL_ROOT/Qwen3-8B" \
   bash "$REPO/scripts/utils/download_qwen3_models.sh"
 
-# 3) 自检
+# 3) teacher-state 覆盖度选择需要 sklearn
+"$VENV_DIR/bin/python" -m pip install -q scikit-learn
+
+# 4) 自检
 echo
 echo "=== setup check ==="
 for f in \
@@ -81,7 +86,8 @@ OUTPUT_ROOT=/content/drive/MyDrive/outputs_think8b
 FIXED_DIR="$OUTPUT_ROOT/fixed_pool"
 mkdir -p "$FIXED_DIR"
 
-# ---- 1) 生成 thinking 固定轨迹（已有就复用） ----
+# ---- 1) 生成 thinking 固定轨迹池（16 query × 16 条 = 256） ----
+# 重新生成：删掉 rollouts.jsonl 再跑；或用 --force。
 if [ -f "$FIXED_DIR/rollouts.jsonl" ]; then
   echo ">>> reuse $FIXED_DIR/rollouts.jsonl"
 else
@@ -90,21 +96,47 @@ else
     --tokenizer-path /content/models/Qwen3-1.7B \
     --queries-json "$REPO/assets/fixed_pool_think/queries.json" \
     --enable-thinking \
-    --n-samples 8 --max-tokens 16384 --max-num-seqs 32 \
+    --n-samples 16 --max-tokens 16384 --max-num-seqs 32 \
     --out "$FIXED_DIR/rollouts.jsonl"
 fi
 
-# ---- 2) 切分 train_64 / holdout_64（已有就复用） ----
-if [ -f "$FIXED_DIR/train_64.jsonl" ] && [ -f "$FIXED_DIR/holdout_64.jsonl" ]; then
+# ---- 2) 收集 teacher 隐状态（每条轨迹 8 个 response 位置） ----
+if [ -f "$FIXED_DIR/teacher_states.npz" ]; then
+  echo ">>> reuse $FIXED_DIR/teacher_states.npz"
+else
+  "$PY" -I "$REPO/scripts/analysis/collect_teacher_states_for_rollouts.py" \
+    --rollouts "$FIXED_DIR/rollouts.jsonl" \
+    --teacher-path /content/models/Qwen3-8B \
+    --positions 8 \
+    --out "$FIXED_DIR/teacher_states.npz"
+fi
+
+# ---- 3) teacher-state 覆盖度选 64 train + 64 不相交 holdout ----
+if [ -f "$FIXED_DIR/selected_train_64.json" ] && \
+   [ -f "$FIXED_DIR/selected_holdout_64.json" ]; then
+  echo ">>> reuse teacher-state selection"
+else
+  "$PY" -I "$REPO/scripts/analysis/select_diverse_pool_from_states.py" \
+    --states "$FIXED_DIR/teacher_states.npz" \
+    --out-dir "$FIXED_DIR" \
+    --n-train 64 --n-holdout 64
+fi
+
+# ---- 4) 切 train_64 / holdout_64（用上面选出的 indices） ----
+# 重新筛选：删掉 selected_* 和 train_64/holdout_64 再跑。
+if [ -f "$FIXED_DIR/train_64.jsonl" ] && [ -f "$FIXED_DIR/holdout_64.jsonl" ] && \
+   [ -f "$FIXED_DIR/selected_train_64.json" ]; then
   echo ">>> reuse $FIXED_DIR/train_64.jsonl / holdout_64.jsonl"
 else
   "$PY" -I "$REPO/scripts/analysis/build_fixed_pool_split.py" \
     --rollouts "$FIXED_DIR/rollouts.jsonl" \
     --out-dir "$FIXED_DIR" \
-    --n-train 4 --n-holdout 4 --max-response 16384
+    --train-indices "$FIXED_DIR/selected_train_64.json" \
+    --holdout-indices "$FIXED_DIR/selected_holdout_64.json" \
+    --max-response 16384
 fi
 
-# ---- 3) 四臂训练/评测 ----
+# ---- 5) 四臂训练/评测 ----
 export SKIP_SETUP=1
 export KEEP_WEIGHTS=1
 export MODEL_PATH=/content/models/Qwen3-1.7B
@@ -142,10 +174,18 @@ cat "$OUTPUT_ROOT"/result.json 2>/dev/null | tail -120
 
 说明：
 
-- 中途断了重跑同一个 cell 即可：rollouts/train/holdout 会复用，已完成的评测会跳过，
-  已有 checkpoint 只重评；`KEEP_WEIGHTS=1` 保留权重。
+- 固定池流程和旧版一致：16 query × 16 条池子 → teacher 8B 在每条轨迹的 8 个
+  response 位置提 final-layer 隐状态 → PCA 50 + KMeans 覆盖度贪心选 64 条 train
+  → 从剩余池再选 64 条 holdout（对 train 相似度做惩罚，且 indices 与 train 不相交）。
+  `build_fixed_pool_split.py` 会再 assert 两个集合没有完全相同的
+  `(prompt_ids, response_ids)`。
+- 中途断了重跑同一个 cell 即可：rollouts/teacher_states/selections/train/holdout
+  会复用，已完成的评测会跳过，已有 checkpoint 只重评；`KEEP_WEIGHTS=1` 保留权重。
 - 时间不够就分两次：把 `ARMS` 改成 `"base onfkl fixedfkl"` 跑一次，再改成
   `"onrkl fixedrkl"` 跑一次。
+- teacher-state 选择需要 `scikit-learn`；Cell 3 已经装了。如果池子/模型改了，
+  删掉 `rollouts.jsonl`、`teacher_states.npz`、`selected_*`、`train_64*`、
+  `holdout_64*` 后重跑。
 - 分析命令（另开 cell）：
 
   ```bash
