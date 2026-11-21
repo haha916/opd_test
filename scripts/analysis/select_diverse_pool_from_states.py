@@ -6,21 +6,25 @@ hidden states, PCA, KMeans, then greedily pick trajectories that cover new
 clusters while penalizing trajectories whose mean state is too similar to the
 already selected ones.
 
-Two disjoint sets are selected:
+Two modes:
 
-* train:   n_train trajectories from the full pool;
-* holdout: n_holdout trajectories from the remaining pool, also state-diverse
-  and penalized against similarity to the train set.
+* ``--holdout-states`` given: train prompts and holdout prompts are different
+  files/pools.  Select n_train from the train pool and n_holdout from the
+  holdout pool; the prompt-disjointness itself is checked by
+  ``build_fixed_pool_split.py``.
+* only ``--states``: one pool; train and holdout indices are disjoint subsets
+  of the same pool (prompts are shared in this mode).
 
-Outputs (indices into the rollouts JSONL):
+Outputs (indices into the corresponding rollouts JSONL):
   selected_train_64.json
   selected_holdout_64.json
   selection_states.json
 
-Example:
+Example (prompt-disjoint):
   python -I scripts/analysis/select_diverse_pool_from_states.py \
-    --states /content/drive/MyDrive/outputs_think8b/fixed_pool/teacher_states.npz \
-    --out-dir /content/drive/MyDrive/outputs_think8b/fixed_pool \
+    --states .../train_states.npz \
+    --holdout-states .../holdout_states.npz \
+    --out-dir .../fixed_pool \
     --n-train 64 --n-holdout 64
 """
 
@@ -38,12 +42,43 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def greedy_select(sets, sim, candidates, n, covered_init, maxsim_init):
-    """Greedy coverage selection with a similarity penalty.
+def load_hidden(path):
+    with np.load(path) as f:
+        return f["hidden"].astype(np.float32)
 
-    sets[i]: set of cluster ids covered by trajectory i.
-    sim:     [N, N] cosine similarity of trajectory-mean states.
-    """
+
+def cluster_pool(hidden, pca_dim, kmeans_k):
+    """Return per-trajectory cluster sets, trajectory similarity, stats."""
+    N, P, H = hidden.shape
+    flat = hidden.reshape(-1, H)
+    flat = flat / (np.linalg.norm(flat, axis=1, keepdims=True) + 1e-12)
+
+    from sklearn.cluster import KMeans
+    from sklearn.decomposition import PCA
+
+    nc = min(pca_dim, len(flat), H)
+    pca = PCA(n_components=nc, random_state=0)
+    z = pca.fit_transform(flat)
+    K = min(kmeans_k, len(flat))
+    km = KMeans(n_clusters=K, random_state=0, n_init=10).fit(z)
+    labels = km.labels_.reshape(N, P)
+    sets = [set(labels[i].tolist()) for i in range(N)]
+    all_clusters = set(labels.reshape(-1).tolist())
+
+    traj_sig = hidden.mean(1)
+    traj_sig = traj_sig / (np.linalg.norm(traj_sig, axis=1, keepdims=True) + 1e-12)
+    sim = traj_sig @ traj_sig.T
+    return sets, sim, {
+        "n": N,
+        "pca": nc,
+        "k": K,
+        "pca_explained": float(pca.explained_variance_ratio_.sum()),
+        "all_coverage": len(all_clusters) / K,
+    }
+
+
+def greedy_select(sets, sim, candidates, n, covered_init, maxsim_init):
+    """Greedy coverage selection with a similarity penalty."""
     covered = set(covered_init)
     maxsim = maxsim_init.copy()
     chosen: set[int] = set()
@@ -68,7 +103,12 @@ def greedy_select(sets, sim, candidates, n, covered_init, maxsim_init):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--states", required=True)
+    p.add_argument("--states", required=True, help="train-pool states npz")
+    p.add_argument(
+        "--holdout-states",
+        default="",
+        help="separate holdout-pool states npz (prompt-disjoint mode)",
+    )
     p.add_argument("--out-dir", required=True)
     p.add_argument("--pca", type=int, default=50)
     p.add_argument("--kmeans", type=int, default=200)
@@ -76,56 +116,71 @@ def main():
     p.add_argument("--n-holdout", type=int, default=64)
     args = p.parse_args()
 
-    with np.load(args.states) as f:
-        hidden = f["hidden"].astype(np.float32)
-    N, P, H = hidden.shape
-    log(f"rollouts={N} states_per_rollout={P} hidden={H}")
-    if args.n_train + args.n_holdout > N:
-        raise SystemExit(
-            f"need {args.n_train}+{args.n_holdout} trajectories, pool has {N}"
-        )
-
-    flat = hidden.reshape(-1, H)
-    flat = flat / (np.linalg.norm(flat, axis=1, keepdims=True) + 1e-12)
-
-    from sklearn.cluster import KMeans
-    from sklearn.decomposition import PCA
-
-    nc = min(args.pca, len(flat), H)
-    pca = PCA(n_components=nc, random_state=0)
-    z = pca.fit_transform(flat)
-    K = min(args.kmeans, len(flat))
-    km = KMeans(n_clusters=K, random_state=0, n_init=10).fit(z)
-    labels = km.labels_.reshape(N, P)
-    all_clusters = set(labels.reshape(-1).tolist())
-    log(f"PCA {nc} dims ({pca.explained_variance_ratio_.sum():.3f}), "
-        f"K={K}, all coverage={len(all_clusters)/K:.3f}")
-
-    sets = [set(labels[i].tolist()) for i in range(N)]
-    traj_sig = hidden.mean(1)
-    traj_sig = traj_sig / (np.linalg.norm(traj_sig, axis=1, keepdims=True) + 1e-12)
-    sim = traj_sig @ traj_sig.T
+    train_hidden = load_hidden(args.states)
+    train_sets, train_sim, train_info = cluster_pool(
+        train_hidden, args.pca, args.kmeans
+    )
+    Nt = train_info["n"]
+    log(
+        f"train pool: rollouts={Nt} pca={train_info['pca']} "
+        f"K={train_info['k']} all_coverage={train_info['all_coverage']:.3f}"
+    )
+    if args.n_train > Nt:
+        raise SystemExit(f"need {args.n_train} train, pool has {Nt}")
 
     train, train_cov = greedy_select(
-        sets, sim, list(range(N)), args.n_train,
-        set(), np.full(N, -1.0, dtype=np.float32),
+        train_sets, train_sim, list(range(Nt)), args.n_train,
+        set(), np.full(Nt, -1.0, dtype=np.float32),
     )
-    log(f"train selected {len(train)}, coverage={len(train_cov)/K:.3f}")
-
-    train_set = set(train)
-    candidates = [i for i in range(N) if i not in train_set]
-    # penalize holdout trajectories that are too similar to the train set
-    maxsim_init = sim[train].max(axis=0) if train else np.full(N, -1.0, dtype=np.float32)
-    holdout, hold_cov = greedy_select(
-        sets, sim, candidates, args.n_holdout,
-        set(), maxsim_init.astype(np.float32),
+    log(
+        f"train selected {len(train)}, coverage="
+        f"{len(train_cov)/train_info['k']:.3f}"
     )
-    log(f"holdout selected {len(holdout)}, coverage={len(hold_cov)/K:.3f}")
 
-    if train_set & set(holdout):
-        raise SystemExit("train/holdout selection overlap")
+    if args.holdout_states:
+        hold_hidden = load_hidden(args.holdout_states)
+        hold_sets, hold_sim, hold_info = cluster_pool(
+            hold_hidden, args.pca, args.kmeans
+        )
+        Nh = hold_info["n"]
+        log(
+            f"holdout pool: rollouts={Nh} pca={hold_info['pca']} "
+            f"K={hold_info['k']} all_coverage={hold_info['all_coverage']:.3f}"
+        )
+        if args.n_holdout > Nh:
+            raise SystemExit(f"need {args.n_holdout} holdout, pool has {Nh}")
+        holdout, hold_cov = greedy_select(
+            hold_sets, hold_sim, list(range(Nh)), args.n_holdout,
+            set(), np.full(Nh, -1.0, dtype=np.float32),
+        )
+        log(
+            f"holdout selected {len(holdout)}, coverage="
+            f"{len(hold_cov)/hold_info['k']:.3f}"
+        )
+        same_pool = False
+    else:
+        train_set = set(train)
+        candidates = [i for i in range(Nt) if i not in train_set]
+        maxsim_init = (
+            train_sim[train].max(axis=0)
+            if train
+            else np.full(Nt, -1.0, dtype=np.float32)
+        )
+        holdout, hold_cov = greedy_select(
+            train_sets, train_sim, candidates, args.n_holdout,
+            set(), maxsim_init.astype(np.float32),
+        )
+        hold_info = train_info
+        same_pool = True
+        log(
+            f"holdout selected {len(holdout)}, coverage="
+            f"{len(hold_cov)/train_info['k']:.3f}"
+        )
+
     if len(train) != args.n_train or len(holdout) != args.n_holdout:
         raise SystemExit("selection shortfall")
+    if same_pool and set(train) & set(holdout):
+        raise SystemExit("train/holdout selection overlap")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -135,29 +190,25 @@ def main():
     (out_dir / f"selected_holdout_{args.n_holdout}.json").write_text(
         json.dumps(holdout)
     )
+    payload = {
+        "same_pool": same_pool,
+        "train": {
+            "pool": train_info,
+            "n": len(train),
+            "coverage": len(train_cov) / train_info["k"],
+            "indices": train,
+        },
+        "holdout": {
+            "pool": hold_info,
+            "n": len(holdout),
+            "coverage": len(hold_cov) / hold_info["k"],
+            "indices": holdout,
+        },
+    }
     (out_dir / "selection_states.json").write_text(
-        json.dumps(
-            {
-                "n": N,
-                "pca": nc,
-                "k": K,
-                "pca_explained": float(pca.explained_variance_ratio_.sum()),
-                "all_coverage": len(all_clusters) / K,
-                "train": {
-                    "n": len(train),
-                    "coverage": len(train_cov) / K,
-                    "indices": train,
-                },
-                "holdout": {
-                    "n": len(holdout),
-                    "coverage": len(hold_cov) / K,
-                    "indices": holdout,
-                },
-            },
-            indent=2,
-        )
+        json.dumps(payload, indent=2)
     )
-    log(f"wrote selections under {out_dir}")
+    log(f"wrote selections under {out_dir} (same_pool={same_pool})")
 
 
 if __name__ == "__main__":

@@ -2,10 +2,14 @@
 
 配置：学生 `Qwen/Qwen3-1.7B`，教师 `Qwen/Qwen3-8B`（base，支持 thinking），
 `ENABLE_THINKING=True`，四臂 `onfkl/onrkl/fixedfkl/fixedrkl`，默认 60 步。
-固定轨迹用 thinking 学生重新生成：16 个 query × 16 条，然后用 **teacher 隐状态覆盖度**
-选 64 条 train + 64 条 **不相交** holdout（和旧 fixed pool 的
-`select_diverse_pool.py` 同一套做法）。输出到
-`/content/drive/MyDrive/outputs_think8b`，不覆盖旧结果。
+固定轨迹用 thinking 学生重新生成，并做 **prompt 级不相交**：
+
+- train 用 16 个 query（来自 `train_opd_5120.parquet`）；
+- holdout 从 5120 的补集 `train_rest.parquet` 里另采 16 个 prompt；
+- 两边各生成 16 query × 16 条轨迹，再用 **teacher 隐状态覆盖度** 各选 64 条；
+- 所以 holdout 的**问题和轨迹**都没有出现在训练里（on-policy 训练用的是 5120 的子集）。
+
+输出到 `/content/drive/MyDrive/outputs_think8b`，不覆盖旧结果。
 
 建议 80GB A100；40GB 很可能 OOM。OOM 时见 Cell 4 里的降配注释。
 
@@ -86,10 +90,28 @@ OUTPUT_ROOT=/content/drive/MyDrive/outputs_think8b
 FIXED_DIR="$OUTPUT_ROOT/fixed_pool"
 mkdir -p "$FIXED_DIR"
 
-# ---- 1) 生成 thinking 固定轨迹池（16 query × 16 条 = 256） ----
-# 重新生成：删掉 rollouts.jsonl 再跑；或用 --force。
-if [ -f "$FIXED_DIR/rollouts.jsonl" ]; then
-  echo ">>> reuse $FIXED_DIR/rollouts.jsonl"
+# ---- 0) 确保 5120 OPD split：holdout 的 prompt 来自 train_rest ----
+"$PY" "$REPO/src/data/split_opd_train.py" \
+  --input /content/data/grpo_processed/train.parquet \
+  --output-dir /content/data/grpo_processed \
+  --opd-size 5120 --seed 42
+
+# ---- 1) holdout queries：从 5120 的补集里采 16 个 prompt ----
+# 这 16 个 prompt 和 train 的 16 个 query 不同，也不在 on-policy 的 5120 训练池里。
+if [ -f "$FIXED_DIR/holdout_queries.json" ]; then
+  echo ">>> reuse $FIXED_DIR/holdout_queries.json"
+else
+  "$PY" -I "$REPO/scripts/analysis/build_holdout_queries.py" \
+    --rest-parquet /content/data/grpo_processed/train_rest.parquet \
+    --opd-parquet /content/data/grpo_processed/train_opd_5120.parquet \
+    --tokenizer-path /content/models/Qwen3-1.7B \
+    --enable-thinking --n 16 --seed 0 \
+    --out "$FIXED_DIR/holdout_queries.json"
+fi
+
+# ---- 2) 生成 train / holdout 两个轨迹池（各 16 query × 16 条） ----
+if [ -f "$FIXED_DIR/train_rollouts.jsonl" ]; then
+  echo ">>> reuse $FIXED_DIR/train_rollouts.jsonl"
 else
   "$PY" -I "$REPO/scripts/analysis/gen_fixed_pool_rollouts_for_model.py" \
     --model-path /content/models/Qwen3-1.7B \
@@ -97,46 +119,68 @@ else
     --queries-json "$REPO/assets/fixed_pool_think/queries.json" \
     --enable-thinking \
     --n-samples 16 --max-tokens 16384 --max-num-seqs 32 \
-    --out "$FIXED_DIR/rollouts.jsonl"
+    --out "$FIXED_DIR/train_rollouts.jsonl"
+fi
+if [ -f "$FIXED_DIR/holdout_rollouts.jsonl" ]; then
+  echo ">>> reuse $FIXED_DIR/holdout_rollouts.jsonl"
+else
+  "$PY" -I "$REPO/scripts/analysis/gen_fixed_pool_rollouts_for_model.py" \
+    --model-path /content/models/Qwen3-1.7B \
+    --tokenizer-path /content/models/Qwen3-1.7B \
+    --queries-json "$FIXED_DIR/holdout_queries.json" \
+    --enable-thinking \
+    --n-samples 16 --max-tokens 16384 --max-num-seqs 32 \
+    --out "$FIXED_DIR/holdout_rollouts.jsonl"
 fi
 
-# ---- 2) 收集 teacher 隐状态（每条轨迹 8 个 response 位置） ----
-if [ -f "$FIXED_DIR/teacher_states.npz" ]; then
-  echo ">>> reuse $FIXED_DIR/teacher_states.npz"
+# ---- 3) 两个池分别收集 teacher 隐状态（每条 8 个 response 位置） ----
+if [ -f "$FIXED_DIR/train_states.npz" ]; then
+  echo ">>> reuse $FIXED_DIR/train_states.npz"
 else
   "$PY" -I "$REPO/scripts/analysis/collect_teacher_states_for_rollouts.py" \
-    --rollouts "$FIXED_DIR/rollouts.jsonl" \
+    --rollouts "$FIXED_DIR/train_rollouts.jsonl" \
     --teacher-path /content/models/Qwen3-8B \
     --positions 8 \
-    --out "$FIXED_DIR/teacher_states.npz"
+    --out "$FIXED_DIR/train_states.npz"
+fi
+if [ -f "$FIXED_DIR/holdout_states.npz" ]; then
+  echo ">>> reuse $FIXED_DIR/holdout_states.npz"
+else
+  "$PY" -I "$REPO/scripts/analysis/collect_teacher_states_for_rollouts.py" \
+    --rollouts "$FIXED_DIR/holdout_rollouts.jsonl" \
+    --teacher-path /content/models/Qwen3-8B \
+    --positions 8 \
+    --out "$FIXED_DIR/holdout_states.npz"
 fi
 
-# ---- 3) teacher-state 覆盖度选 64 train + 64 不相交 holdout ----
+# ---- 4) 覆盖度选择：train 64 from train pool；holdout 64 from holdout pool ----
 if [ -f "$FIXED_DIR/selected_train_64.json" ] && \
    [ -f "$FIXED_DIR/selected_holdout_64.json" ]; then
   echo ">>> reuse teacher-state selection"
 else
   "$PY" -I "$REPO/scripts/analysis/select_diverse_pool_from_states.py" \
-    --states "$FIXED_DIR/teacher_states.npz" \
+    --states "$FIXED_DIR/train_states.npz" \
+    --holdout-states "$FIXED_DIR/holdout_states.npz" \
     --out-dir "$FIXED_DIR" \
     --n-train 64 --n-holdout 64
 fi
 
-# ---- 4) 切 train_64 / holdout_64（用上面选出的 indices） ----
+# ---- 5) 切资产；assert prompt 级不相交 + 无相同轨迹 ----
 # 重新筛选：删掉 selected_* 和 train_64/holdout_64 再跑。
 if [ -f "$FIXED_DIR/train_64.jsonl" ] && [ -f "$FIXED_DIR/holdout_64.jsonl" ] && \
    [ -f "$FIXED_DIR/selected_train_64.json" ]; then
   echo ">>> reuse $FIXED_DIR/train_64.jsonl / holdout_64.jsonl"
 else
   "$PY" -I "$REPO/scripts/analysis/build_fixed_pool_split.py" \
-    --rollouts "$FIXED_DIR/rollouts.jsonl" \
-    --out-dir "$FIXED_DIR" \
+    --train-rollouts "$FIXED_DIR/train_rollouts.jsonl" \
+    --holdout-rollouts "$FIXED_DIR/holdout_rollouts.jsonl" \
     --train-indices "$FIXED_DIR/selected_train_64.json" \
     --holdout-indices "$FIXED_DIR/selected_holdout_64.json" \
+    --out-dir "$FIXED_DIR" \
     --max-response 16384
 fi
 
-# ---- 5) 四臂训练/评测 ----
+# ---- 6) 四臂训练/评测 ----
 export SKIP_SETUP=1
 export KEEP_WEIGHTS=1
 export MODEL_PATH=/content/models/Qwen3-1.7B
@@ -174,13 +218,19 @@ cat "$OUTPUT_ROOT"/result.json 2>/dev/null | tail -120
 
 说明：
 
-- 固定池流程和旧版一致：16 query × 16 条池子 → teacher 8B 在每条轨迹的 8 个
-  response 位置提 final-layer 隐状态 → PCA 50 + KMeans 覆盖度贪心选 64 条 train
-  → 从剩余池再选 64 条 holdout（对 train 相似度做惩罚，且 indices 与 train 不相交）。
-  `build_fixed_pool_split.py` 会再 assert 两个集合没有完全相同的
-  `(prompt_ids, response_ids)`。
+- 固定池流程：train 的 16 个 query 来自 5120；holdout 的 16 个 prompt 来自
+  `train_rest`（5120 的补集）。两边各生成 256 条轨迹 → teacher 8B 在每条轨迹的
+  8 个 response 位置提 final-layer 隐状态 → PCA 50 + KMeans 覆盖度各选 64 条。
+  `build_fixed_pool_split.py` 会 assert：
+  - train/holdout 的 `prompt_ids` 完全不相交（prompt 级）；
+  - 没有完全相同的 `(prompt_ids, response_ids)`（轨迹级）。
+- on-policy 训练只用 5120 的一个子集（`ONPOLICY_BATCH × STEPS`），holdout 的
+  prompt 在 5120 之外，所以 on-policy 训练也没见过这些题。
 - 中途断了重跑同一个 cell 即可：rollouts/teacher_states/selections/train/holdout
   会复用，已完成的评测会跳过，已有 checkpoint 只重评；`KEEP_WEIGHTS=1` 保留权重。
+- 如果 `build_fixed_pool_split.py` 报 “share N prompts”，说明 `train_rest.parquet`
+  不是 5120 的补集；删掉 `holdout_queries.json`/`holdout_rollouts.jsonl`/
+  `holdout_states.npz` 后重跑（Cell 4 第一步会重建 5120 split）。
 - 时间不够就分两次：把 `ARMS` 改成 `"base onfkl fixedfkl"` 跑一次，再改成
   `"onrkl fixedrkl"` 跑一次。
 - teacher-state 选择需要 `scikit-learn`；Cell 3 已经装了。如果池子/模型改了，
