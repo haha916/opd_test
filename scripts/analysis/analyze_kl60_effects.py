@@ -12,10 +12,11 @@ Support repair is reported in two primary sections:
 An optional held-out section (``holdout_64.jsonl``) is kept for backward
 compatibility.
 
-Definition: at each response position the observed token is y.  It is a
-candidate when ``p_T(y) > tau_T`` and ``base p_S(y) < tau_S``.  Repair for a
-criterion is the arm satisfying abs (``p_after >= tau_S``), rel50
-(``p_after >= 0.5*p_T``) or rel90 (``p_after >= 0.9*p_T``).
+Definition: at every response position, every vocabulary token v is
+considered.  It is a candidate when ``p_T(v) > tau_T`` and
+``base p_S(v) < tau_S``.  Repair for a criterion is the arm satisfying abs
+(``p_after >= tau_S``), rel50 (``p_after >= 0.5*p_T``) or rel90
+(``p_after >= 0.9*p_T``).
 
 Repair rates are reported under three averages:
 
@@ -151,11 +152,11 @@ def _new_acc():
 
 
 def support_stats(rows, teacher, students, arms, args):
-    """Teacher-forced observed-token repair on one trajectory set.
+    """Teacher-forced full-vocabulary support repair on one trajectory set.
 
-    At each response position the observed token is y.  Candidate:
-    p_T(y) > tau_T and base p_S(y) < tau_S.  Repair: abs (p_after >= tau_S),
-    rel50 (p_after >= 0.5*p_T), rel90 (p_after >= 0.9*p_T).  Each criterion is
+    At every position, every vocabulary token v is considered. Candidate:
+    p_T(v) > tau_T and base p_S(v) < tau_S. Repair: abs (p_after >= tau_S),
+    rel50 (p_after >= 0.5*p_T), rel90 (p_after >= 0.9*p_T). Each criterion is
     reported under T (token), Q (trajectory) and W (teacher probability).
     """
     tau_t = args.tau_teacher
@@ -165,15 +166,12 @@ def support_stats(rows, teacher, students, arms, args):
 
     acc = {name: _new_acc() for name in arms}
 
-    def obs_logp(logits, y):
-        return F.log_softmax(logits.float(), dim=-1).gather(-1, y[:, None]).squeeze(-1)
-
     with torch.inference_mode():
         for ti, row in enumerate(rows):
             prompt = row["prompt_ids"]
             resp = row["response_ids"][: args.max_response]
             rr = len(resp)
-            traj_cand = {name: 0 for name in arms}
+            traj_low = {name: 0 for name in arms}
             traj_rep = {name: {crit: 0 for crit in CRITERIA} for name in arms}
             for s0 in range(0, rr, seg):
                 s1 = min(rr, s0 + seg)
@@ -186,47 +184,51 @@ def support_stats(rows, teacher, students, arms, args):
                 }
                 for c0 in range(0, L, chunk):
                     c1 = min(L, c0 + chunk)
-                    y = torch.tensor(resp[s0 + c0:s0 + c1], dtype=torch.long, device=args.device)
-                    t_py = obs_logp(lt[c0:c1], y).exp()
-                    b_py = obs_logp(ls["base"][c0:c1], y).exp()
-                    # 口径：轨迹在该位置的 token y 满足 p_T(y) > tau_T 且 p_base(y) < tau_S
-                    support = t_py > tau_t
-                    cand = support & (b_py < tau_s)
-                    n_cand = int(cand.sum().item())
-                    cand_mass = float((t_py * cand).sum().item())
+                    t_lp = F.log_softmax(lt[c0:c1].float(), dim=-1)
+                    t_p = t_lp.exp()
+                    b_lp = F.log_softmax(ls["base"][c0:c1].float(), dim=-1)
+                    b_p = b_lp.exp()
+
+                    # 口径：全词表，p_T(v) > tau_T 且 p_base(v) < tau_S
+                    support = t_p > tau_t
+                    low = support & (b_p < tau_s)
+                    low_tokens = int(low.sum().item())
+                    low_mass = float((t_p * low).sum().item())
 
                     for name in arms:
-                        a_py = obs_logp(ls[name][c0:c1], y).exp()
+                        a_lp = F.log_softmax(ls[name][c0:c1].float(), dim=-1)
+                        a_p = a_lp.exp()
+
                         criteria = {
-                            "abs": a_py >= tau_s,
-                            "rel50": a_py >= 0.5 * t_py,
-                            "rel90": a_py >= 0.9 * t_py,
+                            "abs": a_p >= tau_s,
+                            "rel50": a_p >= 0.5 * t_p,
+                            "rel90": a_p >= 0.9 * t_p,
                         }
-                        broken = support & (b_py >= tau_s) & (a_py < tau_s)
-                        traj_cand[name] += n_cand
+                        broken = support & (b_p >= tau_s) & (a_p < tau_s)
+                        traj_low[name] += low_tokens
                         a = acc[name]
                         a["positions"] += (c1 - c0)
-                        a["low_base_tokens"] += n_cand
+                        a["low_base_tokens"] += low_tokens
                         a["newly_broken_tokens"] += int(broken.sum().item())
-                        a["mass_low_base"] += cand_mass
+                        a["mass_low_base"] += low_mass
                         for crit, cond in criteria.items():
-                            rep = cand & cond
+                            rep = low & cond
                             n_rep = int(rep.sum().item())
                             r = a["repairs"][crit]
                             r["t_num"] += n_rep
-                            r["w_num"] += float((t_py * rep).sum().item())
+                            r["w_num"] += float((t_p * rep).sum().item())
                             traj_rep[name][crit] += n_rep
                             del rep
-                        del a_py, criteria, broken
-                    del t_py, b_py, support, cand, y
+                        del a_lp, a_p, criteria, broken
+                    del t_lp, t_p, b_lp, b_p, support, low
                 del lt, ls, ids
             for name in arms:
                 acc[name]["trajectories"] += 1
                 a = acc[name]
-                if traj_cand[name] > 0:
+                if traj_low[name] > 0:
                     for crit in CRITERIA:
                         r = a["repairs"][crit]
-                        r["q_sum"] += traj_rep[name][crit] / traj_cand[name]
+                        r["q_sum"] += traj_rep[name][crit] / traj_low[name]
                         r["q_count"] += 1
             if (ti + 1) % 8 == 0:
                 log(f"support: {ti + 1}/{len(rows)} trajectories")
@@ -414,13 +416,13 @@ def write_report(path, settings, support, generation):
     lines += [
         "",
         "口径：",
-        "- 候选 token：轨迹在该位置的 token `y` 满足 `p_T(y) > tau_T` 且 "
-        "`p_base(y) < tau_S`。",
+        "- 候选 token：每个位置的**全词表** token `v` 满足 `p_T(v) > tau_T` 且 "
+        "`p_base(v) < tau_S`。",
         "- 修复判据：`abs`（`p_after >= tau_S`）、`>=50% p_T`（`p_after >= 0.5*p_T`）、"
         "`>=90% p_T`（`p_after >= 0.9*p_T`）。",
         "- T = token 等权（所有候选 token 同权池化）；Q = 问题/轨迹等权"
         "（先算每条轨迹的修复率，再对轨迹平均）；W = teacher 概率加权（权重 `p_T(y)`）。",
-        "- `broken(τ=1%)`：teacher-supported 的观测 token 中，base 覆盖"
+        "- `broken(τ=1%)`：teacher-supported 的全词表 token 中，base 覆盖"
         "（`p_base >= tau_S`）但训练后 `p_after < tau_S` 的个数。",
     ]
 
