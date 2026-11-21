@@ -307,7 +307,9 @@ PY=/content/verl_env/bin/python
   --out-dir /content/drive/MyDrive/outputs/kl60_analysis
 ```
 
-- `--max-response 7168` 与固定轨迹同长度上限；教师轨迹更长的部分会被截断。
+- `--max-response` 要和该配置训练/分析时的截断长度一致：kl60 是 7168；
+  DAPO state pool 那套 64 条固定轨迹是 8192（截断后 382,561 个 response 位置）。
+  教师轨迹更长的部分也会被截断。
 - **GPU**：把 `--device cpu --threads 20` 改成 `--device cuda`（`--threads` 会被忽略）。
   显存约需 25GB（4B 教师 + base + 4×1.7B，bf16）；A100 40GB/80GB 可跑，L4/T4 24GB 不够。
   OOM 时降 `--segment 1024 --chunk 32`，或分两次跑：train 段
