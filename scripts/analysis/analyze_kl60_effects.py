@@ -12,16 +12,16 @@ Support repair is reported in two primary sections:
 An optional held-out section (``holdout_64.jsonl``) is kept for backward
 compatibility.
 
-Definition: at position t, token v is "teacher-supported, student-low-prob"
-when ``p_T(v) >= tau_T`` and ``base p_S(v) < tau_S``.  Repair = the arm's
-``p_S(v) >= tau_S``.
+Definition: at each response position the observed token is y.  It is a
+candidate when ``p_T(y) > tau_T`` and ``base p_S(y) < tau_S``.  Repair for a
+criterion is the arm satisfying abs (``p_after >= tau_S``), rel50
+(``p_after >= 0.5*p_T``) or rel90 (``p_after >= 0.9*p_T``).
 
-Repair rates are reported under three averages plus a teacher-weighted average:
+Repair rates are reported under three averages:
 
-* token (micro):        sum(repaired) / sum(low)
-* trajectory (macro):   mean_i repaired_i / low_i   (each trajectory equal)
-* position (macro):     mean_t repaired_t / low_t   (each position equal)
-* teacher-weighted:     sum(p_T * repaired) / sum(p_T * low)
+* T = token:        sum(repaired) / sum(candidates)
+* Q = trajectory:   mean_i repaired_i / candidates_i   (each trajectory equal)
+* W = teacher-weighted: sum(p_T * repaired) / sum(p_T * candidates)
 
 Generation effects (existing eval ``{bench}.jsonl`` files) are unchanged.
 
@@ -140,54 +140,41 @@ def _new_acc():
     return {
         "trajectories": 0,
         "positions": 0,
-        "support_tokens": 0,
         "low_base_tokens": 0,
         "newly_broken_tokens": 0,
-        "mass_support": 0.0,
         "mass_low_base": 0.0,
-        "mass_recovered": 0.0,
-        "cov_support_base": 0.0,
-        "cov_support_arm": 0.0,
-        "top1_ps_base": 0.0,
-        "top1_ps_arm": 0.0,
         "repairs": {
             crit: {"t_num": 0, "q_sum": 0.0, "q_count": 0, "w_num": 0.0}
             for crit in CRITERIA
         },
-        "topk_low_base_tokens": 0,
-        "topk_repaired_tokens": 0,
-        "topk_low_mass": 0.0,
-        "topk_recovered_mass": 0.0,
-        "topk_cov_base": 0.0,
-        "topk_cov_arm": 0.0,
     }
 
 
 def support_stats(rows, teacher, students, arms, args):
-    """Teacher-forced support repair on one trajectory set.
+    """Teacher-forced observed-token repair on one trajectory set.
 
-    Candidate: p_T > tau_T and base p_S < tau_S.
-    Repair: abs (p_after >= tau_S), rel50 (p_after >= 0.5*p_T),
-    rel90 (p_after >= 0.9*p_T).  Each criterion is reported under T (token),
-    Q (trajectory) and W (teacher probability) averaging.
+    At each response position the observed token is y.  Candidate:
+    p_T(y) > tau_T and base p_S(y) < tau_S.  Repair: abs (p_after >= tau_S),
+    rel50 (p_after >= 0.5*p_T), rel90 (p_after >= 0.9*p_T).  Each criterion is
+    reported under T (token), Q (trajectory) and W (teacher probability).
     """
     tau_t = args.tau_teacher
     tau_s = args.tau_student
-    topk = args.topk
     chunk = args.chunk
     seg = args.segment
 
     acc = {name: _new_acc() for name in arms}
+
+    def obs_logp(logits, y):
+        return F.log_softmax(logits.float(), dim=-1).gather(-1, y[:, None]).squeeze(-1)
 
     with torch.inference_mode():
         for ti, row in enumerate(rows):
             prompt = row["prompt_ids"]
             resp = row["response_ids"][: args.max_response]
             rr = len(resp)
-            traj_low = {name: 0 for name in arms}
-            traj_rep = {
-                name: {crit: 0 for crit in CRITERIA} for name in arms
-            }
+            traj_cand = {name: 0 for name in arms}
+            traj_rep = {name: {crit: 0 for crit in CRITERIA} for name in arms}
             for s0 in range(0, rr, seg):
                 s1 = min(rr, s0 + seg)
                 L = s1 - s0
@@ -199,114 +186,64 @@ def support_stats(rows, teacher, students, arms, args):
                 }
                 for c0 in range(0, L, chunk):
                     c1 = min(L, c0 + chunk)
-                    t_lp = F.log_softmax(lt[c0:c1].float(), dim=-1)
-                    t_p = t_lp.exp()
-                    b_lp = F.log_softmax(ls["base"][c0:c1].float(), dim=-1)
-                    b_p = b_lp.exp()
-
-                    # 口径：p_T(y) > 1% 且 p_base(y) < 1%
-                    support = t_p > tau_t
-                    low = support & (b_p < tau_s)
-                    support_mass = (t_p * support).sum(-1)
-                    low_mass = (t_p * low).sum(-1)
-                    low_tokens = int(low.sum().item())
-
-                    topk_p, topk_i = t_p.topk(topk, dim=-1)
-                    b_topk = b_p.gather(-1, topk_i)
-                    topk_low = b_topk < tau_s
-                    topk_mass = topk_p.sum(-1)
-                    topk_low_mass = (topk_p * topk_low).sum(-1)
-
-                    top1_i = t_p.argmax(dim=-1, keepdim=True)
-                    b_top1 = b_p.gather(-1, top1_i).squeeze(-1)
+                    y = torch.tensor(resp[s0 + c0:s0 + c1], dtype=torch.long, device=args.device)
+                    t_py = obs_logp(lt[c0:c1], y).exp()
+                    b_py = obs_logp(ls["base"][c0:c1], y).exp()
+                    # 口径：轨迹在该位置的 token y 满足 p_T(y) > tau_T 且 p_base(y) < tau_S
+                    support = t_py > tau_t
+                    cand = support & (b_py < tau_s)
+                    n_cand = int(cand.sum().item())
+                    cand_mass = float((t_py * cand).sum().item())
 
                     for name in arms:
-                        a_lp = F.log_softmax(ls[name][c0:c1].float(), dim=-1)
-                        a_p = a_lp.exp()
-                        a_topk = a_p.gather(-1, topk_i)
-                        a_top1 = a_p.gather(-1, top1_i).squeeze(-1)
-
-                        # 三种修复判据
+                        a_py = obs_logp(ls[name][c0:c1], y).exp()
                         criteria = {
-                            "abs": a_p >= tau_s,
-                            "rel50": a_p >= 0.5 * t_p,
-                            "rel90": a_p >= 0.9 * t_p,
+                            "abs": a_py >= tau_s,
+                            "rel50": a_py >= 0.5 * t_py,
+                            "rel90": a_py >= 0.9 * t_py,
                         }
-                        newly = support & (b_p >= tau_s) & (a_p < tau_s)
-                        recovered = ((a_p - b_p).clamp_min(0.0) * low).sum(-1)
-                        topk_repaired = topk_low & (a_topk >= tau_s)
-
-                        traj_low[name] += low_tokens
+                        broken = support & (b_py >= tau_s) & (a_py < tau_s)
+                        traj_cand[name] += n_cand
                         a = acc[name]
                         a["positions"] += (c1 - c0)
-                        a["support_tokens"] += int(support.sum().item())
-                        a["low_base_tokens"] += low_tokens
-                        a["newly_broken_tokens"] += int(newly.sum().item())
-                        a["mass_support"] += float(support_mass.sum().item())
-                        a["mass_low_base"] += float(low_mass.sum().item())
-                        a["mass_recovered"] += float(recovered.sum().item())
-                        a["cov_support_base"] += float((b_p * support).sum().item())
-                        a["cov_support_arm"] += float((a_p * support).sum().item())
-                        a["top1_ps_base"] += float(b_top1.sum().item())
-                        a["top1_ps_arm"] += float(a_top1.sum().item())
-                        a["topk_low_base_tokens"] += int(topk_low.sum().item())
-                        a["topk_repaired_tokens"] += int(topk_repaired.sum().item())
-                        a["topk_low_mass"] += float(topk_low_mass.sum().item())
-                        a["topk_recovered_mass"] += float(
-                            ((a_topk - b_topk).clamp_min(0.0) * topk_low).sum().item()
-                        )
-                        a["topk_cov_base"] += float(b_topk.sum().item())
-                        a["topk_cov_arm"] += float(a_topk.sum().item())
-
+                        a["low_base_tokens"] += n_cand
+                        a["newly_broken_tokens"] += int(broken.sum().item())
+                        a["mass_low_base"] += cand_mass
                         for crit, cond in criteria.items():
-                            rep = low & cond
-                            r = a["repairs"][crit]
+                            rep = cand & cond
                             n_rep = int(rep.sum().item())
+                            r = a["repairs"][crit]
                             r["t_num"] += n_rep
-                            r["w_num"] += float((t_p * rep).sum().item())
+                            r["w_num"] += float((t_py * rep).sum().item())
                             traj_rep[name][crit] += n_rep
                             del rep
-
-                        del a_lp, a_p, a_topk, a_top1, criteria, newly, recovered, topk_repaired
-
-                    del t_lp, t_p, b_lp, b_p, support, low, topk_p, topk_i, b_topk, topk_low
+                        del a_py, criteria, broken
+                    del t_py, b_py, support, cand, y
                 del lt, ls, ids
             for name in arms:
                 acc[name]["trajectories"] += 1
                 a = acc[name]
-                if traj_low[name] > 0:
+                if traj_cand[name] > 0:
                     for crit in CRITERIA:
                         r = a["repairs"][crit]
-                        r["q_sum"] += traj_rep[name][crit] / traj_low[name]
+                        r["q_sum"] += traj_rep[name][crit] / traj_cand[name]
                         r["q_count"] += 1
             if (ti + 1) % 8 == 0:
                 log(f"support: {ti + 1}/{len(rows)} trajectories")
 
     for name in arms:
         a = acc[name]
-        pos = max(1, a["positions"])
         for crit in CRITERIA:
             r = a["repairs"][crit]
             r["T"] = r["t_num"] / max(1, a["low_base_tokens"])
             r["Q"] = r["q_sum"] / max(1, r["q_count"])
             r["W"] = r["w_num"] / max(1e-12, a["mass_low_base"])
-        # backward-compatible aliases for the abs criterion
         a["repaired_tokens"] = a["repairs"]["abs"]["t_num"]
         a["repaired_frac"] = a["repairs"]["abs"]["T"]
         a["traj_repaired_frac_mean"] = a["repairs"]["abs"]["Q"]
         a["teacher_weighted_repaired_frac"] = a["repairs"]["abs"]["W"]
         a["mass_repaired_teacher"] = a["repairs"]["abs"]["w_num"]
-        a["mass_recovered_frac"] = a["mass_recovered"] / max(1e-12, a["mass_low_base"])
-        a["support_cov_base"] = a["cov_support_base"] / max(1e-12, a["mass_support"])
-        a["support_cov_arm"] = a["cov_support_arm"] / max(1e-12, a["mass_support"])
-        a["top1_ps_base_mean"] = a["top1_ps_base"] / pos
-        a["top1_ps_arm_mean"] = a["top1_ps_arm"] / pos
-        a["topk_repaired_frac"] = a["topk_repaired_tokens"] / max(1, a["topk_low_base_tokens"])
-        a["topk_mass_recovered_frac"] = a["topk_recovered_mass"] / max(1e-12, a["topk_low_mass"])
-        a["topk_cov_base"] = a["topk_cov_base"] / pos
-        a["topk_cov_arm"] = a["topk_cov_arm"] / pos
     return acc
-
 
 ALL_ARMS = ("onfkl", "onrkl", "fixedfkl", "fixedrkl")
 FIXED_ARMS = ("fixedfkl", "fixedrkl")
@@ -447,7 +384,8 @@ def generation_analysis(eval_dirs):
             keys = ("acc", "acc_corrected", "boxed_rate", "parseable_boxed_rate",
                     "boxed_after_think_rate", "final_boxed_rate", "boxed_not_trunc",
                     "trunc_rate", "stop_rate", "no_think_close_rate",
-                    "length_mean", "logp_mean", "cross_logp_mean")
+                    "length_mean", "length_median", "logp_mean", "logp_median",
+                    "cross_logp_mean")
             macro = {k: float(np.mean([per_bench[b][k] for b in per_bench]))
                      for k in keys
                      if all(per_bench[b][k] is not None for b in per_bench)}
@@ -476,11 +414,14 @@ def write_report(path, settings, support, generation):
     lines += [
         "",
         "口径：",
-        "- 候选 token：`p_T(y) > tau_T` 且 `p_base(y) < tau_S`。",
+        "- 候选 token：轨迹在该位置的 token `y` 满足 `p_T(y) > tau_T` 且 "
+        "`p_base(y) < tau_S`。",
         "- 修复判据：`abs`（`p_after >= tau_S`）、`>=50% p_T`（`p_after >= 0.5*p_T`）、"
         "`>=90% p_T`（`p_after >= 0.9*p_T`）。",
         "- T = token 等权（所有候选 token 同权池化）；Q = 问题/轨迹等权"
         "（先算每条轨迹的修复率，再对轨迹平均）；W = teacher 概率加权（权重 `p_T(y)`）。",
+        "- `broken(τ=1%)`：teacher-supported 的观测 token 中，base 覆盖"
+        "（`p_base >= tau_S`）但训练后 `p_after < tau_S` 的个数。",
     ]
 
     for key, sec in support.items():
@@ -534,11 +475,12 @@ def write_report(path, settings, support, generation):
         acc_str = f"{100*m.get('acc', float('nan')):.2f}"
         if acc_corr is not None:
             acc_str += f" ({100*acc_corr:.2f} corr)"
+        self_logp = m.get("logp_mean")
         lines.append(
             f"| {name} | {m.get('length_mean', float('nan')):.0f} "
             f"({m.get('length_median', float('nan')):.0f}) | "
-            f"{cross if cross is not None else 'NaN'} | "
-            f"{m.get('logp_mean') if m.get('logp_mean') is not None else 'NaN'} | "
+            f"{f'{cross:.4f}' if cross is not None else 'NaN'} | "
+            f"{f'{self_logp:.4f}' if self_logp is not None else 'NaN'} | "
             f"{100*m.get('no_think_close_rate', float('nan')):.2f}% | "
             f"{100*m.get('boxed_after_think_rate', float('nan')):.2f}% | "
             f"{100*m.get('parseable_boxed_rate', float('nan')):.2f}% | "
