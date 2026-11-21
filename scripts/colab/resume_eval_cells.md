@@ -14,9 +14,16 @@
 - on-policy rollout 最大生成长度统一 **7168**；评测生成到 32k。
 - 评测：aime24 / aime25 / amc23，n=4，32k，**T=1.0，top_p=1.0，top_k=-1**，
   base tokenizer；held-out 64 条（与固定池训练轨迹零重叠）的全词表 RKL/FKL。
-- 评测现在额外记录每条生成样本的 **`mean_logp`**（采样 token 的平均
-  log-prob），并保留 `finish_reason` / `truncated` / `tokens` / `boxed`，
-  供后面的分析用。
+- 评测额外记录每条生成样本的 **`mean_logp`**（采样 token 的平均 log-prob），
+  并保留 `finish_reason` / `truncated` / `tokens` / `boxed`，供分析用。
+
+**流程分两段，不要混在一起：**
+
+- **Part A — 环境准备**（Cell 1/2/3，每个新 runtime 跑一次）：挂 Drive、拉代码、
+  建 venv、下数据、下模型。**只准备，不训练、不评测。**
+- **Part B — 任务执行**（Cell 4/5/6/8）：训练、评测、分析。Part B 的 pipeline 调用
+  都带 `SKIP_SETUP=1`：缺环境/数据/模型时直接报错退出，不会在任务中途开始
+  15–25 分钟的下载。缺东西就回 Part A。
 
 **这次要保存权重**：`KEEP_WEIGHTS=1`。权重要留到分析脚本跑完，约 3.4GB/arm。
 结果和权重都在 Drive：
@@ -27,84 +34,11 @@
 - 汇总：`outputs/kl60_<日期>/result.json`
 - 分析：`outputs/kl60_<日期>/analysis/REPORT.md`
 
-**可续跑 / 重评 / 重训**：
-
-- 已有完整评测（`all_summary.json + holdout_kl.json`）的 arm 跳过；
-- 已有 step-60 checkpoint 的 arm 只重评、不重训；
-- `REEVAL_ARMS="fixedfkl"`：忽略已有评测，对**已有 checkpoint** 重跑评测、不重训。
-  这正是旧 fixedfkl 评测没有 logp 时需要的（旧 summary 被 `--resume` 复用了）；
-- `FORCE_ARMS="fixedfkl"`：忽略已有评测和 checkpoint，强制重训（只有权重被删了才需要）；
-- `REEVAL_ARMS="base"` / `FORCE_ARMS="base"` 对 base 同理；
-- 评测现在强制 `--no-resume`，不会再复用旧 summary；
-- 每个 arm 评测成功后才删权重；`KEEP_WEIGHTS=1` 时永远保留。
-
-**时间**：完整五个对象可能超过单次 Colab 会话。推荐分两次训练 + 一次分析：
-
-1. `ARMS="base onfkl fixedfkl"`，`REEVAL_ARMS="fixedfkl"`，`KEEP_WEIGHTS=1`
-2. `ARMS="onrkl fixedrkl"`，`KEEP_WEIGHTS=1`
-3. 分析 cell
-
-如果 fixedfkl 的 checkpoint 已经被删，把上面的 `REEVAL_ARMS` 换成
-`FORCE_ARMS="fixedfkl"` 重训一次。
-
 ---
 
-## 现在怎么继续（已经跑过上一版，2026-11-20）
+## Part A — 环境准备（每个新 runtime 一次）
 
-当前状态：
-
-- `base` 已完成（macro acc 22.22%）；
-- `fixedfkl` 已训练、held-out 已算（RKL −16.7%、FKL −56.3%），但 benchmark summary 是旧
-  `--resume` 复用的、`avg_logp=null`，需要重评；
-- `onfkl` 在 step 1 报 `zip() argument 2 is shorter`（full-vocab 分支回归，已在
-  `054f6a1` 修复）；
-- `onrkl` / `fixedrkl` 尚未跑。
-
-按下面顺序：
-
-1. 拉最新代码（新 runtime 先 Cell 1/2）：
-
-   ```bash
-   %%bash
-   git -C /content/OPSD_OnPolicyDistillation pull --ff-only
-   git -C /content/OPSD_OnPolicyDistillation log --oneline -1
-   ```
-
-2. 先跑 **Cell 8** 的 1 步 smoke，确认 full-vocab 不再报 `zip()`；日志里应正常结束
-   `OPD Training: 1/1`。
-   注意 smoke 用 **batch 8**：verl 的 agent loop 有 8 个 worker，要求 prompt batch
-   能被 8 整除；batch 2 会在 rollout 阶段报 `only support equal chunk`，与
-   full-vocab 无关。
-
-3. 跑剩余 arm（保存权重）：
-
-   ```bash
-   %%bash
-   set -uo pipefail
-   REPO=/content/OPSD_OnPolicyDistillation
-
-   export KEEP_WEIGHTS=1
-   export ARMS="fixedfkl onfkl onrkl fixedrkl"
-   export REEVAL_ARMS="fixedfkl"
-
-   bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
-   ```
-
-   - fixedfkl 权重还在 → `REEVAL_ARMS="fixedfkl"`（只重评、不重训）；
-   - 权重被删了 → 换成 `FORCE_ARMS="fixedfkl"`；
-   - 时间不够就分两次：
-     `ARMS="fixedfkl onfkl" REEVAL_ARMS="fixedfkl" KEEP_WEIGHTS=1`，
-     然后 `ARMS="onrkl fixedrkl" KEEP_WEIGHTS=1`；
-   - 中途断了重跑同一组，已完成的评测会跳过，已有 checkpoint 只重评。
-
-4. 四个训练臂都完成后，跑 **Cell 6** 的分析，生成
-   `outputs/kl60_analysis/REPORT.md`（修复数 + 长度/logp/终止/答案率）。
-
-> 之前 `result.json` 里的 fixedfkl 53.26% 是旧 summary；这次重评会刷新。
-
----
-
-## Cell 1 — 挂载 Drive
+### Cell 1 — 挂载 Drive
 
 ```python
 from google.colab import drive
@@ -113,7 +47,7 @@ drive.mount('/content/drive')
 
 ---
 
-## Cell 2 — 克隆 / 更新仓库
+### Cell 2 — 克隆 / 更新仓库
 
 ```bash
 %%bash
@@ -131,123 +65,59 @@ free -g | head -2
 
 ---
 
-## Cell 3 — 第一次：setup + base + on-policy FKL + fixed FKL（保存权重）
+### Cell 3 — 安装环境 + 数据 + 模型（只准备，不训练）
 
-新运行时 `/content` 会清空，这个 cell 自动重建 venv/模型/数据；Drive 里的结果会复用。
+新运行时 `/content` 会清空，这个 cell 自动重建 venv/数据/模型；Drive 里的结果会复用。
+`RUN_PIPELINE=0` 保证 bootstrap 不会顺手开始训练。
 
 ```bash
 %%bash
-set -uo pipefail
+set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 
-export KEEP_WEIGHTS=1
-export ARMS="base onfkl fixedfkl"
-export REEVAL_ARMS="fixedfkl"    # 对已有 checkpoint 重评；没有权重时会自动训练
-# export ONPOLICY_BATCH=16       # 默认按 RAM 自动选
-# export MODEL_PATH=/workspace/models/models/Qwen3-1.7B
-# export TEACHER_MODEL_PATH=/workspace/models/models/Qwen3-4B-Instruct-2507
+export VENV_DIR=/content/verl_env
+export MODEL_ROOT=/content/models
+export DATA_DIR=/content/data
 
-bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
-```
+# 1) venv + 训练/评测数据（只准备）
+REPO_DIR="$REPO" \
+VENV_DIR="$VENV_DIR" \
+MODEL_ROOT="$MODEL_ROOT" \
+DATA_DIR="$DATA_DIR" \
+INSTALL_ENV=1 DOWNLOAD_MODELS=0 PREPARE_DATA=1 RUN_PIPELINE=0 \
+  bash "$REPO/scripts/colab/bootstrap_colab.sh"
 
-它会：
+# 2) KL60 的 1.7B 学生 + 4B 教师
+#    （bootstrap 默认下 Qwen3-0.6B，这里显式指定 KL60 用的模型）
+PYTHON="$VENV_DIR/bin/python" \
+MODEL_ROOT="$MODEL_ROOT" \
+STUDENT_ID=Qwen/Qwen3-1.7B \
+TEACHER_ID=Qwen/Qwen3-4B-Instruct-2507 \
+  bash "$REPO/scripts/utils/download_qwen3_models.sh"
 
-1. 创建 `/content/verl_env`、下载 Qwen3-1.7B + Qwen3-4B-Instruct-2507、准备 DAPO/AIME/AMC 数据；
-2. 评 base（只做 benchmark，不做 held-out）；
-3. 训练 on-policy FKL 60 步；
-4. 重评 fixed FKL 60 步（新评测带 logp；如果权重已删会自动重训）；
-5. 每个训练臂评测 benchmark + held-out RKL/FKL，权重保留。
-
----
-
-## Cell 4 — 第二次：on-policy RKL + fixed RKL（保存权重）
-
-同一个 runtime 直接跑；新 runtime 先跑 Cell 1/2（pipeline 会自动 setup，已完成的
-base/fixedfkl 会跳过）。
-
-```bash
-%%bash
-set -uo pipefail
-REPO=/content/OPSD_OnPolicyDistillation
-
-export KEEP_WEIGHTS=1
-export ARMS="onrkl fixedrkl"
-
-bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
-```
-
----
-
-## Cell 5 — 查看结果
-
-```bash
-%%bash
-echo "== combined result =="
-cat /content/drive/MyDrive/outputs/kl60_*/result.json 2>/dev/null | tail -120
-
+# 3) 自检：缺任何一项都直接失败
 echo
-echo "== eval dirs =="
-for d in base60 onfkl60 onrkl60 fixedfkl60 fixedrkl60; do
-  echo "-- $d"
-  ls "/content/drive/MyDrive/outputs/eval/$d" 2>/dev/null
+echo "=== setup check ==="
+for f in \
+  "$VENV_DIR/bin/python" \
+  "$MODEL_ROOT/Qwen3-1.7B/config.json" \
+  "$MODEL_ROOT/Qwen3-4B-Instruct-2507/config.json" \
+  "$DATA_DIR/DAPO-Math-17k/data/dapo-math-17k-dedup.parquet" \
+  "$DATA_DIR/grpo_processed/val_aime24.parquet" \
+  "$DATA_DIR/grpo_processed/val_aime25.parquet" \
+  "$DATA_DIR/grpo_processed/val_amc23.parquet" \
+  "$REPO/assets/fixed_pool/holdout_64.jsonl"; do
+  [ -e "$f" ] && echo "OK   $f" || { echo "MISS $f"; exit 1; }
 done
 ```
 
----
-
-## Cell 6 — 分析：修复了多少 teacher-supported / student-low-prob token + FKL 对长度/logp/终止/答案率的影响
-
-前提：Cell 3/4 已跑完，且 `KEEP_WEIGHTS=1`（权重在 Drive 上）。新 runtime 先跑
-Cell 1/2 + Cell 7 的 setup。
-
-```bash
-%%bash
-set -uo pipefail
-REPO=/content/OPSD_OnPolicyDistillation
-PY=/content/verl_env/bin/python
-
-"$PY" -I "$REPO/scripts/analysis/analyze_kl60_effects.py" \
-  --output-root /content/drive/MyDrive/outputs \
-  --base-model /content/models/Qwen3-1.7B \
-  --teacher-path /content/models/Qwen3-4B-Instruct-2507 \
-  --data "$REPO/assets/fixed_pool/holdout_64.jsonl" \
-  --selected "$REPO/assets/fixed_pool/holdout_64_selected.json" \
-  --device cpu --threads 20 \
-  --out-dir /content/drive/MyDrive/outputs/kl60_analysis
-```
-
-输出：
-
-- `kl60_analysis/REPORT.md`：修复表 + 生成行为表 + 分 benchmark 表
-- `kl60_analysis/support_repair.json`
-- `kl60_analysis/generation_effects.json`
-
-**support 修复的口径**（可用 `--tau-teacher/--tau-student/--topk` 改）：
-
-- teacher-supported：`p_T(v) >= tau_T`（默认 1%）；另有 teacher top-20 口径；
-- student-low-probability：base 学生 `p_S(v) < tau_S`（默认 1%）；
-- 修复：训练后 `p_S(v) >= tau_S`；
-- 同时报告新破坏数、净修复、教师质量恢复率、支持集覆盖、`p_S(教师 top1)`。
-
-**generation 行为**（读 `{bench}.jsonl`）：
-
-- 输出长度 mean / median / p90；
-- 采样 token 的平均 log-prob（新评测才有，旧评测显示 NaN）；
-- 终止行为：`finish_reason` 分布、stop 率、trunc 率；
-- 有效答案率：`boxed` 率、`boxed & 未截断` 率、accuracy。
-
-只想跑其中一部分时：
-
-```bash
-# 只做修复分析（不读 eval jsonl）
-... analyze_kl60_effects.py ... --skip-generation
-# 只做生成行为分析（不加载模型）
-... analyze_kl60_effects.py ... --skip-support
-```
+耗时约 15–25 分钟（venv + 数据为主）。跑完这个 cell 才算环境就绪。
 
 ---
 
-## Cell 7 — 可选：只准备环境（调试用）
+### Cell 7 — 可选：只重建环境（调试）
+
+和 Cell 3 等价的最小版本，用于已经有数据、只想补 venv/模型的场景。
 
 ```bash
 %%bash
@@ -265,7 +135,189 @@ PYTHON=/content/verl_env/bin/python \
 
 ---
 
-## Cell 8 — 可选：只验证 on-policy 的 1 步（不评测）
+## Part B — 任务执行（环境已就绪）
+
+### 当前状态与本次任务（2026-11-21）
+
+- 新 runtime 已建好 → 先跑 **Part A**。
+- Drive 上已有 `base` / `onfkl` / `onrkl` / `fixedrkl` 的评测和权重。
+- `fixedfkl`：`outputs/eval/fixedfkl60/` 里有新评测 jsonl（带 logp），但
+  `outputs/fixedfkl60/train/step_0060` 的权重已不在（上次 eval 后被删），所以
+  Cell 6 的 support 表少这一臂（报告顶部 `models:` 行里没有 `fixedfkl`）。
+- 本次任务：**Part A → Cell 4a 补 fixedfkl → Cell 6a 生成教师评测轨迹 →
+  Cell 6b 运行两部分 support 分析 + 生成行为分析**。
+- 新版分析脚本（两部分 support + 教师轨迹生成）在 `colab-deepseek-entropy`
+  分支；跑 Cell 6 前确认 Colab 仓库已包含
+  `scripts/analysis/gen_teacher_eval_trajectories.py` 和带
+  `--train-data/--teacher-eval-data` 的 `analyze_kl60_effects.py`。
+
+> 如果 Drive 上 fixedfkl 权重其实还在别的位置，可以跳过 4a，直接给 Cell 6 的
+> 分析脚本加 `--models ... fixedfkl=<实际路径> ...`（必须同时传 `base=`）。
+
+---
+
+### Cell 4 — 训练 / 评测
+
+所有调用都带 `SKIP_SETUP=1`，环境没准备好会直接报错，不会自动下载。
+
+#### 4a — 补 fixedfkl（当前要做）
+
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+
+export SKIP_SETUP=1
+export KEEP_WEIGHTS=1
+export ARMS="fixedfkl"
+export REEVAL_ARMS="fixedfkl"   # 权重缺失会自动重训；不允许因旧 summary 跳过
+
+bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
+```
+
+#### 4b — 其余 arm（需要补跑 / 重跑时）
+
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+
+export SKIP_SETUP=1
+export KEEP_WEIGHTS=1
+export ARMS="onrkl fixedrkl"    # 换成实际要跑的 arm
+# export REEVAL_ARMS="onrkl"    # 忽略已有评测，对已有 checkpoint 重评
+# export FORCE_ARMS="fixedrkl"  # 忽略评测和 checkpoint，强制重训
+
+bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
+```
+
+#### 4c — 全量（时间不够就拆成多次）
+
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+
+export SKIP_SETUP=1
+export KEEP_WEIGHTS=1
+export ARMS="base onfkl fixedfkl onrkl fixedrkl"
+
+bash "$REPO/scripts/colab/run_kl60_pipeline.sh"
+```
+
+**可续跑 / 重评 / 重训的语义：**
+
+- 已有完整评测（`all_summary.json + holdout_kl.json`）的 arm 跳过；
+- 已有 step-60 checkpoint 的 arm 只重评、不重训；
+- `REEVAL_ARMS="fixedfkl"`：忽略已有评测，对**已有 checkpoint** 重跑评测、不重训；
+  如果 checkpoint 已经不在了，会重新训练（这正是 4a 的情况）；
+- `FORCE_ARMS="fixedfkl"`：忽略已有评测和 checkpoint，强制重训；
+- 评测强制 `--no-resume`，不会再复用旧 summary；
+- 只有 `KEEP_WEIGHTS=0`（默认）时，评测成功后才删权重；`KEEP_WEIGHTS=1` 永远保留。
+
+---
+
+### Cell 5 — 查看结果
+
+```bash
+%%bash
+echo "== combined result =="
+cat /content/drive/MyDrive/outputs/kl60_*/result.json 2>/dev/null | tail -120
+
+echo
+echo "== eval dirs =="
+for d in base60 onfkl60 onrkl60 fixedfkl60 fixedrkl60; do
+  echo "-- $d"
+  ls "/content/drive/MyDrive/outputs/eval/$d" 2>/dev/null
+done
+```
+
+---
+
+### Cell 6 — 分析：两部分 support 修复 + 四种方法的生成行为
+
+前提：Cell 4 已跑完（四个臂的 checkpoint 都在 Drive），且 `KEEP_WEIGHTS=1`。
+分析分两部分：
+
+1. **学生 off-policy 训练轨迹**（`train_64.jsonl`）——只看两个 fixed 臂
+   （`fixedfkl` / `fixedrkl`），因为它们是在这批轨迹上训练的；
+2. **教师评测集轨迹**（aime24/25/amc23，教师生成）——四个臂都看。
+
+两部分都按同一口径统计：`p_T(v) >= 1%` 且 base `p_S(v) < 1%` 的 token，
+训练后 `p_S(v) >= 1%` 记为修复。每个臂给四种修复率：
+
+- `token 平均`（micro）：修复 token 数 / 未覆盖 token 数；
+- `轨迹平均`（macro）：每条轨迹算一个修复率，再对轨迹等权平均；
+- `位置平均`（macro）：每个位置算一个修复率，再对位置等权平均；
+- `教师加权`：`sum(p_T * repaired) / sum(p_T * low)`。
+
+最后是四种方法在 aime24/25/amc23 上的输出长度、`mean_logp`、
+`finish_reason`/截断、`boxed` 与 accuracy（读已有 `eval/*60/*.jsonl`）。
+
+#### 6a — 生成教师评测集轨迹（只需跑一次，GPU）
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+OUT=/content/drive/MyDrive/outputs/teacher_eval_traj/teacher_eval_traj.jsonl
+
+if [ -f "$OUT" ]; then
+  echo "reuse $OUT"
+else
+  "$PY" -I "$REPO/scripts/analysis/gen_teacher_eval_trajectories.py" \
+    --model-path /content/models/Qwen3-4B-Instruct-2507 \
+    --tokenizer-path /content/models/Qwen3-1.7B \
+    --data-dir /content/data/grpo_processed \
+    --benchmarks aime24 aime25 amc23 \
+    --n 1 --max-tokens 32768 --max-model-len 34000 \
+    --out "$OUT"
+fi
+```
+
+默认每题 1 条教师轨迹（aime24 30 + aime25 30 + amc23 40 = 100 条）。
+想多采样就改 `--n`；文件已存在时默认复用，`--force` 重生成（写 `.partial`
+后原子改名，中断不会留下可复用的半成品）。
+
+#### 6b — 运行分析
+
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+
+"$PY" -I "$REPO/scripts/analysis/analyze_kl60_effects.py" \
+  --output-root /content/drive/MyDrive/outputs \
+  --base-model /content/models/Qwen3-1.7B \
+  --teacher-path /content/models/Qwen3-4B-Instruct-2507 \
+  --train-data "$REPO/assets/fixed_pool/train_64.jsonl" \
+  --train-selected "$REPO/assets/fixed_pool/train_64_selected.json" \
+  --teacher-eval-data /content/drive/MyDrive/outputs/teacher_eval_traj/teacher_eval_traj.jsonl \
+  --device cpu --threads 20 \
+  --max-response 7168 \
+  --out-dir /content/drive/MyDrive/outputs/kl60_analysis
+```
+
+- `--max-response 7168` 与固定轨迹同长度上限；教师轨迹更长的部分会被截断。
+- 想额外跑原来的 held-out 64 条，加
+  `--data "$REPO/assets/fixed_pool/holdout_64.jsonl" --selected "$REPO/assets/fixed_pool/holdout_64_selected.json"`。
+- 只跑 support：加 `--skip-generation`；只跑生成行为：加 `--skip-support`。
+- 某个臂的 checkpoint 缺失时，报告仍会生成，并在该 section 明确列出
+  **缺失臂**，不会再静默少一行。
+
+输出：
+
+- `kl60_analysis/REPORT.md`：两部分 support 表 + generation 表 + 分 benchmark 表；
+- `kl60_analysis/support_repair.json`（按 section 分组）；
+- `kl60_analysis/generation_effects.json`。
+
+---
+
+### Cell 8 — 可选：只验证 on-policy 的 1 步（不评测）
+
+前提：Part A 已完成。这是任务 cell，不是环境 cell。
 
 ```bash
 %%bash
@@ -295,3 +347,7 @@ RUN_DIR=$(find "$OUTPUT_ROOT" -maxdepth 1 -type d -name "*-kl-smoke-OPD-forward_
 echo "smoke run dir: $RUN_DIR"
 rm -rf "$RUN_DIR"
 ```
+
+> smoke 用 **batch 8**：verl 的 agent loop 有 8 个 worker，要求 prompt batch
+> 能被 8 整除；batch 2 会在 rollout 阶段报 `only support equal chunk`，与
+> full-vocab 无关。日志里应正常结束 `OPD Training: 1/1`。

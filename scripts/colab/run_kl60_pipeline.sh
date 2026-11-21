@@ -15,6 +15,9 @@
 #   - held-out full-vocab RKL/FKL on 64 disjoint trajectories
 #
 # Fresh runtime: env / data / models are rebuilt only when missing.
+# To keep setup separate from task execution, run the setup cell first and
+# pass SKIP_SETUP=1 here: the pipeline then fails fast if anything is missing
+# instead of starting a 15-25 min download mid-task.
 # The pipeline is resumable:
 #   - an arm with all_summary.json + holdout_kl.json is skipped;
 #   - an existing step-60 checkpoint is evaluated without retraining;
@@ -25,6 +28,7 @@
 #   ARMS="onfkl fixedfkl" bash ...        # subset / split across sessions
 #   ARMS="onrkl fixedrkl" bash ...        # the other half
 #   KEEP_WEIGHTS=1 bash ...               # keep checkpoints
+#   SKIP_SETUP=1 bash ...                 # env is ready; never auto-setup
 #
 # Overrides:
 #   OUTPUT_ROOT=/content/drive/MyDrive/outputs
@@ -46,6 +50,7 @@ STEPS=${STEPS:-60}
 LEARNING_RATE=${LEARNING_RATE:-3e-6}
 FIXED_BATCH=${FIXED_BATCH:-64}
 KEEP_WEIGHTS=${KEEP_WEIGHTS:-0}
+SKIP_SETUP=${SKIP_SETUP:-0}
 ARMS=${ARMS:-"base onfkl fixedfkl onrkl fixedrkl"}
 FORCE_ARMS=${FORCE_ARMS:-}
 REEVAL_ARMS=${REEVAL_ARMS:-}
@@ -54,7 +59,7 @@ LOG_DIR="$OUTPUT_ROOT/logs"
 mkdir -p "$LOG_DIR"
 echo ">>> arms: $ARMS"
 echo ">>> forced arms: ${FORCE_ARMS:-<none>} | re-eval arms: ${REEVAL_ARMS:-<none>}"
-echo ">>> flags: SKIP_TRAIN=${SKIP_TRAIN:-<unset>} SKIP_EVAL=${SKIP_EVAL:-<unset>} KEEP_WEIGHTS=$KEEP_WEIGHTS"
+echo ">>> flags: SKIP_TRAIN=${SKIP_TRAIN:-<unset>} SKIP_EVAL=${SKIP_EVAL:-<unset>} KEEP_WEIGHTS=$KEEP_WEIGHTS SKIP_SETUP=$SKIP_SETUP"
 
 # ---------------------------------------------------------------------------
 # Drive
@@ -126,6 +131,13 @@ done
 need_models=0
 [ -f "$MODEL_PATH/config.json" ] || need_models=1
 [ -f "$TEACHER_MODEL_PATH/config.json" ] || need_models=1
+
+if [ "$SKIP_SETUP" = "1" ] && { [ "$need_env" = "1" ] || [ "$need_data" = "1" ] || [ "$need_models" = "1" ]; }; then
+    echo "ERROR: SKIP_SETUP=1 but environment / datasets / models are missing."
+    echo "       Run the Part A setup cell first (bootstrap with RUN_PIPELINE=0)."
+    echo "       missing env=$need_env data=$need_data models=$need_models"
+    exit 1
+fi
 
 if [ "$need_env" = "1" ] || [ "$need_data" = "1" ]; then
     echo ">>> fresh runtime setup: environment and datasets (15-25 min)"
