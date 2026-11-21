@@ -307,6 +307,12 @@ PY=/content/verl_env/bin/python
 ```
 
 - `--max-response 7168` 与固定轨迹同长度上限；教师轨迹更长的部分会被截断。
+- **GPU**：把 `--device cpu --threads 20` 改成 `--device cuda`（`--threads` 会被忽略）。
+  显存约需 25GB（4B 教师 + base + 4×1.7B，bf16）；A100 40GB/80GB 可跑，L4/T4 24GB 不够。
+  OOM 时降 `--segment 1024 --chunk 32`，或分两次跑：train 段
+  `--teacher-eval-data ""`（只加载 base + 两个 fixed 臂），teacher 段
+  `--train-data ""`（加载 base + 四个臂）。`--device cuda` 优先 flash-attn，
+  import 失败会自动退回 sdpa。
 - 想额外跑原来的 held-out 64 条，加
   `--data "$REPO/assets/fixed_pool/holdout_64.jsonl" --selected "$REPO/assets/fixed_pool/holdout_64_selected.json"`。
 - 只跑 support：加 `--skip-generation`；只跑生成行为：加 `--skip-support`。

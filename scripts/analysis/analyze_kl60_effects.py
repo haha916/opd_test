@@ -85,7 +85,13 @@ def load_model(path, device):
     kwargs = dict(torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
     if device == "cuda":
         kwargs["device_map"] = {"": 0}
-        kwargs["attn_implementation"] = "flash_attention_2"
+        try:
+            import flash_attn  # noqa: F401
+
+            kwargs["attn_implementation"] = "flash_attention_2"
+        except Exception:  # noqa: BLE001
+            log("flash_attn not importable; falling back to sdpa on cuda")
+            kwargs["attn_implementation"] = "sdpa"
     else:
         kwargs["device_map"] = {"": "cpu"}
         kwargs["attn_implementation"] = "sdpa"
