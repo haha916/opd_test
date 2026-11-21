@@ -147,9 +147,15 @@ def main():
             pos = np.linspace(0, rr - 1, P, dtype=int)
             pos = np.clip(pos, 0, rr - 1)
             pos_t = torch.tensor(pos, dtype=torch.long, device="cuda")
+            # lq covers the last rr+1 logits, so pos_t is response-relative for
+            # the log-probs.  hidden_states[-1] is the FULL sequence
+            # (prompt_len + rr); shift by prompt_len to index the response.
+            hpos_t = torch.tensor(
+                len(r["prompt_ids"]) + pos, dtype=torch.long, device="cuda"
+            )
             lp_sel = lq[pos_t]
             tv, ti = lp_sel.topk(args.teacher_topk, dim=-1)
-            hsel = out.hidden_states[-1][0, pos_t].float().cpu().numpy()
+            hsel = out.hidden_states[-1][0, hpos_t].float().cpu().numpy()
             if hstates is None:
                 H = hsel.shape[-1]
                 hstates = np.zeros((n, P, H), dtype=np.float16)
@@ -162,7 +168,7 @@ def main():
             rec = dict(r)
             rec["teacher_logp"] = tl.cpu().numpy().astype(np.float32).tolist()
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            del ids, out, logits, lq, y, tl, pos_t, lp_sel, tv, ti, hsel
+            del ids, out, logits, lq, y, tl, pos_t, hpos_t, lp_sel, tv, ti, hsel
             if i % 64 == 0:
                 log(f"  teacher logp {i + 1}/{n}")
                 torch.cuda.empty_cache()
