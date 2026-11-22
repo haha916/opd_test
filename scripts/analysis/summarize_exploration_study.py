@@ -212,7 +212,9 @@ def main():
         if g1.get("paired"):
             lines += ["### FKL vs RKL on G1 (FKL-only repair)", ""]
             for key, d in g1["paired"].items():
-                if d.get("mean") is None:
+                # ``delta_visit_rate`` is a plain float; the usage contrasts
+                # are dicts with mean/CI/n.
+                if not isinstance(d, dict) or d.get("mean") is None:
                     continue
                 lines.append(
                     f"- `{key}`: {pct(d['mean'], 2, True)} "
