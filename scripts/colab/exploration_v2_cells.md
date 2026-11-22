@@ -69,6 +69,7 @@ set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 export STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
 export PAIR=fixed
+export STATE_GROUPS="G1 G2 G3"   # G4 控制组在 v1 已有；v2 的 control 是 G3 风格的同前缀匹配
 export MAX_STATES=20
 export PER_GROUP=5
 export SAMPLES=8
@@ -117,6 +118,7 @@ set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 export STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
 export PAIR=online
+export STATE_GROUPS="G1 G2 G3"
 export MAX_STATES=20
 export PER_GROUP=5
 export SAMPLES=8

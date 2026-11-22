@@ -37,7 +37,7 @@ TEACHER_MODEL_PATH=${TEACHER_MODEL_PATH:-$MODEL_ROOT/Qwen3-4B-Instruct-2507}
 
 PAIR=${PAIR:-fixed}
 STAGES=${STAGES:-"panel entries entry_analysis interventions intervention_analysis stage0 entropy"}
-STATE_GROUPS=${STATE_GROUPS:-"G1 G2 G3 G4"}
+STATE_GROUPS=${STATE_GROUPS:-"G1 G2 G3"}
 MAX_STATES=${MAX_STATES:-40}
 PER_GROUP=${PER_GROUP:-10}
 MAX_PER_QUESTION=${MAX_PER_QUESTION:-2}
