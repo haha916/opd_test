@@ -21,14 +21,162 @@
 
 ---
 
-## Part A — 环境准备（新 runtime 才需要）
+## Part A — 新 runtime：环境 + base 模型 + 数据（只准备，不训练）
 
-如果当前 runtime 已经能跑之前的 KL60 评测（`/content/verl_env`、模型、数据都在），
-直接跳到 Part B。否则先按 `scripts/colab/resume_eval_cells.md` 的 **Cell 1/2/3** 做：
+新 runtime 的 `/content` 会清空；**Drive 上的 `outputs/`（已训练的 checkpoint）保留**。
+所以只需要重建：
 
-1. 挂 Drive；
-2. clone / pull 仓库；
-3. `bootstrap_colab.sh` 建 venv + 数据，`download_qwen3_models.sh` 下 1.7B 学生和 4B 教师。
+- `/content/verl_env`：Python 3.12 + vLLM/verl/transformers；
+- `/content/models/Qwen3-1.7B`（学生 base）和 `Qwen3-4B-Instruct-2507`（教师）；
+- `/content/data/grpo_processed`：DAPO + AIME24/25/AMC23 等 parquet。
+
+训练/评测 checkpoint 直接在 Drive 上读：
+`/content/drive/MyDrive/outputs/fixedfkl60/train/step_0060`、
+`fixedrkl60`，以及 `*-onfkl60-OPD-forward_kl-*` / `*-onrkl60-OPD-reverse_kl-*`
+的 `global_step_60/actor/huggingface`。**不需要重新训练。**
+
+### A1 — 挂载 Drive
+
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+```
+
+### A2 — clone / 更新仓库
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+if [ -d "$REPO/.git" ]; then
+  git -C "$REPO" pull --ff-only
+else
+  git clone --depth 1 --branch main https://github.com/haha916/opd_test.git "$REPO"
+fi
+git -C "$REPO" log --oneline -1
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+free -g | head -2
+```
+
+### A3 — 建 venv + 依赖（不下载模型/数据、不训练）
+
+只跑 bootstrap 的 env 部分：`INSTALL_ENV=1 DOWNLOAD_MODELS=0 PREPARE_DATA=0 RUN_PIPELINE=0`。
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+export VENV_DIR=/content/verl_env
+export MODEL_ROOT=/content/models
+export DATA_DIR=/content/data
+
+REPO_DIR="$REPO" \
+VENV_DIR="$VENV_DIR" \
+MODEL_ROOT="$MODEL_ROOT" \
+DATA_DIR="$DATA_DIR" \
+INSTALL_ENV=1 DOWNLOAD_MODELS=0 PREPARE_DATA=0 RUN_PIPELINE=0 \
+  bash "$REPO/scripts/colab/bootstrap_colab.sh"
+```
+
+耗时约 5–10 分钟（vLLM/verl/torch + 可选 flash-attn）。跑完 `$VENV_DIR/bin/python`
+应存在；flash-attn 失败会退回 SDPA，不影响本流程。
+
+### A4 — 下载 base 学生 + 教师
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PYTHON=/content/verl_env/bin/python
+MODEL_ROOT=/content/models
+
+PYTHON="$PYTHON" MODEL_ROOT="$MODEL_ROOT" \
+STUDENT_ID=Qwen/Qwen3-1.7B \
+TEACHER_ID=Qwen/Qwen3-4B-Instruct-2507 \
+  bash "$REPO/scripts/utils/download_qwen3_models.sh"
+```
+
+- 学生 `Qwen3-1.7B` 约 3.4GB，教师 `Qwen3-4B-Instruct-2507` 约 8GB。
+- 已有完整 `config.json + *.safetensors` 的模型会自动跳过；只缺一个也只会补那个。
+- 脚本最后会校验学生/教师 tokenizer 词表一致。
+
+### A5 — 下载并准备训练/评测数据
+
+只跑 bootstrap 的 data 部分：`INSTALL_ENV=0 DOWNLOAD_MODELS=0 PREPARE_DATA=1 RUN_PIPELINE=0`。
+会下载 DAPO-Math-17k（去重）、MATH-500、AIME24/25、AMC23，并转换成
+`$DATA_DIR/grpo_processed/val_*.parquet`。
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+export VENV_DIR=/content/verl_env
+export MODEL_ROOT=/content/models
+export DATA_DIR=/content/data
+
+REPO_DIR="$REPO" \
+VENV_DIR="$VENV_DIR" \
+MODEL_ROOT="$MODEL_ROOT" \
+DATA_DIR="$DATA_DIR" \
+INSTALL_ENV=0 DOWNLOAD_MODELS=0 PREPARE_DATA=1 RUN_PIPELINE=0 \
+  bash "$REPO/scripts/colab/bootstrap_colab.sh"
+```
+
+耗时约 10–20 分钟（DAPO 下载 + 去重为主）。本研究的 rollout 只需要
+`val_aime24/val_aime25/val_amc23`，但 DAPO 也一并准备好，后续训练实验可直接用。
+
+### A6 — 自检：环境 + base 模型 + 数据 + Drive checkpoint
+
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+VENV=/content/verl_env
+MODELS=/content/models
+DATA=/content/data/grpo_processed
+OUT=/content/drive/MyDrive/outputs
+
+echo "=== required env / models / data / assets ==="
+MISSING=0
+for f in \
+  "$VENV/bin/python" \
+  "$MODELS/Qwen3-1.7B/config.json" \
+  "$MODELS/Qwen3-4B-Instruct-2507/config.json" \
+  "$DATA/val_aime24.parquet" \
+  "$DATA/val_aime25.parquet" \
+  "$DATA/val_amc23.parquet" \
+  "$REPO/assets/fixed_pool/train_64.jsonl" \
+  "$REPO/assets/fixed_pool/train_64_selected.json" \
+  "$REPO/assets/fixed_pool/holdout_64.jsonl" \
+  "$REPO/assets/fixed_pool/holdout_64_selected.json"; do
+  if [ -e "$f" ]; then echo "OK   $f"; else echo "MISS $f"; MISSING=1; fi
+done
+[ "$MISSING" = "0" ] || { echo; echo "先补齐上面 MISS 的项，再跑 Part B"; exit 1; }
+
+echo
+echo "=== trained checkpoints on Drive ==="
+for d in "$OUT/fixedfkl60/train/step_0060" "$OUT/fixedrkl60/train/step_0060"; do
+  if [ -f "$d/config.json" ]; then echo "OK   $d"; else echo "MISS $d"; fi
+done
+find "$OUT" -maxdepth 1 -type d \
+  \( -name "*-onfkl60-OPD-forward_kl-*" -o -name "*-onrkl60-OPD-reverse_kl-*" \) \
+  2>/dev/null | sort | sed 's/^/RUN  /'
+
+echo
+echo "=== versions / GPU ==="
+nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
+"$VENV/bin/python" - <<'PY'
+import torch, transformers, vllm
+print("torch        :", torch.__version__, "| CUDA:", torch.version.cuda)
+print("vllm         :", vllm.__version__)
+print("transformers :", transformers.__version__)
+try:
+    import flash_attn
+    print("flash_attn   :", flash_attn.__version__)
+except Exception:
+    print("flash_attn   : not installed -> SDPA")
+PY
+```
 
 Part B 的所有 cell 都假设：
 
@@ -317,8 +465,9 @@ echo; echo "===== BUDGET ====="; cat "$ROOT/budget/BUDGET.md"
 7. **预算曲线**：从已有 32k 生成的 text 重新 tokenize，再按 B token 截断；自回归前缀与真正
    B 预算生成一致。报告里附了 tokenizer 长度 mismatch，先确认它很小再看曲线。
 8. **显存**：candidate pass 只同时加载 teacher+base（约 12GB），每个 arm 单独 pass；A100 40GB
-   足够。L4/T4 24GB 若 OOM，设 `CAND_SEGMENT=1024 CAND_CHUNK=32`；branch/rollout 的 batch
-   用 `MAX_NUM_SEQS` / `GPU_MEM_UTIL` 调。
+   足够。L4/T4 24GB 若 OOM，设 `CAND_SEGMENT=1024 CAND_CHUNK=32`；16GB GPU 建议
+   `DEVICE=cpu` 跑 candidates（慢但可行），或换 A100。branch/rollout 的 batch 用
+   `MAX_NUM_SEQS` / `GPU_MEM_UTIL` 调。
 9. **续跑**：rollout 按题续跑；candidate pass1/pass2 按文件续跑；branch 按 sel_id 续跑。
    重跑同一条命令不会重复已完成的昂贵步骤。
 
