@@ -63,6 +63,8 @@ GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.85}
 DEVICE=${DEVICE:-cuda}
 CAND_SEGMENT=${CAND_SEGMENT:-2048}
 CAND_CHUNK=${CAND_CHUNK:-128}
+MIN_TEACHER_TOP1=${MIN_TEACHER_TOP1:-0.05}
+CF_MIN_P_T=${CF_MIN_P_T:-0.05}
 
 CF_PER_GROUP=${CF_PER_GROUP:-20}
 CF_SAMPLES=${CF_SAMPLES:-4}
@@ -159,6 +161,7 @@ say " pair=$PAIR  arms='$ARMS'  cand_arms='$CAND_ARMS'"
 say " stages: $STAGES"
 say " ref: $BASE_MODEL seed=$REF_SEED n=$REF_N | adoption seed=$ADOPT_SEED n=$ADOPT_N"
 say " rollouts: max_tokens=$ROLLOUT_MAX_TOKENS | CF: per_group=$CF_PER_GROUP samples=$CF_SAMPLES max_new=$CF_MAX_NEW_TOKENS"
+say " candidate: min_teacher_top1=$MIN_TEACHER_TOP1 | branch: min_p_T=$CF_MIN_P_T"
 say " fkl=$FKL_ARM -> $FKL_CKPT"
 say " rkl=$RKL_ARM -> $RKL_CKPT"
 say " counterfactual continuation model=$CF_MODEL_ARM -> $CF_MODEL_CKPT"
@@ -220,7 +223,7 @@ stage_candidates() {
     --tokenizer-path "$TOKENIZER_PATH" \
     --arms "${arms[@]}" \
     --out-dir "$CAND_DIR" \
-    --tau-teacher 0.01 --tau-student 0.01 --min-teacher-top1 0.05 \
+    --tau-teacher 0.01 --tau-student 0.01 --min-teacher-top1 "$MIN_TEACHER_TOP1" \
     --max-per-traj 40 --max-controls-per-traj 20 \
     --max-response "$ROLLOUT_MAX_TOKENS" \
     --device "$DEVICE" --segment "$CAND_SEGMENT" --chunk "$CAND_CHUNK"
@@ -297,7 +300,7 @@ stage_branches() {
     --groups G1 G2 G3 G4 --per-group "$CF_PER_GROUP" \
     --samples "$CF_SAMPLES" --natural-oversample "$CF_NAT_OVERSAMPLE" \
     --max-new-tokens "$CF_MAX_NEW_TOKENS" --max-model-len "$CF_MAX_MODEL_LEN" \
-    --min-p-t 0.05 --max-per-traj 2 --chunk 8 \
+    --min-p-t "$CF_MIN_P_T" --max-per-traj 2 --chunk 8 \
     --gpu-memory-utilization "$GPU_MEM_UTIL" --max-num-seqs "$MAX_NUM_SEQS"
 }
 

@@ -304,19 +304,22 @@ echo; echo "===== BUDGET ====="; cat "$ROOT/budget/BUDGET.md"
    这是有意严格——它测的是“更新后的策略是否还到达旧状态”，不是“文本相似”。
    报告里另有一张 **suffix（最后 32 token）** 表，用来区分“完全没到达”与“到达了相似状态
    但更早的推理已分叉”。
-4. **usage/state**：每个参考状态上 v* 的实际采样频率；未访问记 0。
+4. **候选阈值**：默认 teacher top-1 `p_T ≥ 5%`（`MIN_TEACHER_TOP1`）。如果 candidate 表
+   里 G1/G2/G3 某个组太少，把 `MIN_TEACHER_TOP1=0.02` 重跑 `candidates`（会重建 pass1）
+   和后续 analysis；`CF_MIN_P_T` 控制进入反事实分支的最低 p_T。
+5. **usage/state**：每个参考状态上 v* 的实际采样频率；未访问记 0。
    `adoption_ratio` = 实际采样次数 / 按 p_after 预期的次数；≈1 表示局部概率真正兑现，
    ≪1 表示到了状态但采样没跟上。
-5. **反事实**：forced 用“把 v* 接到 prompt 后”实现；打分时把 v* 和续写一起 decode
+6. **反事实**：forced 用“把 v* 接到 prompt 后”实现；打分时把 v* 和续写一起 decode
    （否则强制出来的 `\boxed{` 或半个答案会被答案抽取器漏掉）。suppressed 用 natural 中
    首 token ≠ v* 的条件子集。两者都不改后续采样参数。`U_force` 是单 token 干预，不能直接
    外推为多 token 序列收益。
-6. **预算曲线**：从已有 32k 生成的 text 重新 tokenize，再按 B token 截断；自回归前缀与真正
+7. **预算曲线**：从已有 32k 生成的 text 重新 tokenize，再按 B token 截断；自回归前缀与真正
    B 预算生成一致。报告里附了 tokenizer 长度 mismatch，先确认它很小再看曲线。
-7. **显存**：candidate pass 只同时加载 teacher+base（约 12GB），每个 arm 单独 pass；A100 40GB
+8. **显存**：candidate pass 只同时加载 teacher+base（约 12GB），每个 arm 单独 pass；A100 40GB
    足够。L4/T4 24GB 若 OOM，设 `CAND_SEGMENT=1024 CAND_CHUNK=32`；branch/rollout 的 batch
    用 `MAX_NUM_SEQS` / `GPU_MEM_UTIL` 调。
-8. **续跑**：rollout 按题续跑；candidate pass1/pass2 按文件续跑；branch 按 sel_id 续跑。
+9. **续跑**：rollout 按题续跑；candidate pass1/pass2 按文件续跑；branch 按 sel_id 续跑。
    重跑同一条命令不会重复已完成的昂贵步骤。
 
 ---
