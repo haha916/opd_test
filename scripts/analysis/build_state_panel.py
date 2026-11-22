@@ -68,6 +68,8 @@ def parse_args():
     p.add_argument("--max-prompt", type=int, default=8000,
                    help="skip states whose prompt+prefix exceeds this")
     p.add_argument("--topk", type=int, default=200)
+    p.add_argument("--span-tokens", type=int, default=1,
+                   help="teacher-greedy span length appended after each entry token")
     p.add_argument("--tau-teacher", type=float, default=0.01)
     p.add_argument("--tau-student", type=float, default=0.01)
     p.add_argument("--out-dir", required=True)
@@ -327,6 +329,29 @@ def main():
 
         entries = state_entries(pts, p0s, pfs, prs, special_np, tokenizer,
                                 args.tau_teacher, args.tau_student)
+        # Optional teacher-greedy span after each entry token.  This makes the
+        # intervention a short, semantically grounded prefix instead of a lone
+        # subword token.  span[0] is always the entry token itself.
+        if args.span_tokens > 1:
+            valid_ids = np.where(~special_np)[0]
+            for key in ("r", "p", "control", "rkl"):
+                e = entries.get(key)
+                if not e:
+                    continue
+                span = [int(e["token"])]
+                for _ in range(args.span_tokens - 1):
+                    cur = prefix + span
+                    pt = probs_at(teacher, cur, args.device).detach().cpu().numpy()
+                    nxt = int(valid_ids[int(np.argmax(pt[valid_ids]))])
+                    span.append(nxt)
+                e["span"] = span
+                e["span_text"] = tokenizer.decode(span, skip_special_tokens=True)
+        else:
+            for key in ("r", "p", "control", "rkl"):
+                e = entries.get(key)
+                if e:
+                    e["span"] = [int(e["token"])]
+
         state = {
             "state_id": si,
             "candidate_id": int(r["candidate_id"]),

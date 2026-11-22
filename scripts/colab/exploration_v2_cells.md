@@ -4,10 +4,14 @@
 **不重新训练**。v2 做四件事：
 
 1. **同前缀三分叉**：在相同 prefix 上强制 `r`（FKL 额外恢复 token）、`p`（FKL 保住但 RKL 丢掉的 token）、
-   `control`（同 prefix 匹配的未恢复 token）、`rkl`（RKL top-1）；分别用 FKL / RKL 作为续写 μ。
+   `control`（同 prefix 匹配的未恢复 token）、`rkl`（RKL top-1）；分别用 FKL / RKL / teacher 作为续写 μ。
+   可选 `SPAN_TOKENS>1`：入口后面接 teacher-greedy 的短 span，避免单个 subword 没有语义。
 2. **软概率干预**：在 FKL 上撤回 `R(s)` / `P(s)`，在 RKL 上注入 `R(s)` / `P(s)`，并和匹配 sham 对比。
-3. **Stage 0 修正**：题目聚类 bootstrap、连续 `Δp = p_F − p_R`、每题累计 token 预算。
-4. **熵匹配 RKL**：同一组 prefix 上调 RKL 温度使条件熵匹配 FKL；可选地跑一轮 eval。
+3. **Stage 0 修正**：题目聚类 bootstrap、连续 `Δp = p_F − p_R`、每题累计 token 预算、
+   pass@1/4/8/16、hard questions 识别。
+4. **等预算 / hard questions**：额外 32k 样本（不同 seed）→ pass@8/16 与累计 token 预算；
+   在 Base+RKL 都失败的题上，用新 seed 生成 FKL 新样本并保存 judge cases。
+5. **熵匹配 RKL**：同一组 prefix 上调 RKL 温度使条件熵匹配 FKL；可选跑一轮 eval。
 
 需要 LLM/过程 judge 的部分**先只保存文件**到 `judge/`，本阶段不调用 judge。
 
@@ -51,17 +55,26 @@ ls "$REPO/scripts/analysis/build_state_panel.py" \
 第一次建议先做 **pilot**：`MAX_STATES=20 PER_GROUP=5`，先估计效应和方差。
 全量再改回 `40/10`。
 
-前台运行，Colab 只有在 cell 执行时保持 runtime 活跃。整条默认 stages：
+前台运行，Colab 只有在 cell 执行时保持 runtime 活跃。所有 stage：
 
-```
-stage0 panel entries entry_analysis interventions intervention_analysis entropy
-```
+| stage | 做什么 | pilot 成本 |
+|---|---|---|
+| `eval_extra` | 每个 arm 再加 `EXTRA_N` 条 32k 评测样本（用于 pass@8/16、等 token 预算） | 3 arms × 100 题 × 4 条 ≈ 3–4 h |
+| `stage0` | 题目聚类 bootstrap、连续 Δp、每题累计 token 预算、hard question 识别 | CPU，几分钟 |
+| `panel` | 20 个 prefix × 4 个模型 forward；构造 R/P/control/RKL top-1；可选 teacher-greedy span | 5–10 min |
+| `entries` | natural/r/p/control/rkl × μ=FKL/RKL | 2–3 h |
+| `entries_teacher` | 同一组 entries 用 teacher 续写（上界诊断） | 2–3 h |
+| `entry_analysis` | 入口 utility（相对 natural），题目聚类 CI | 分钟 |
+| `interventions` | FKL 撤回 / RKL 注入 R、P、both、sham | 2–3 h |
+| `intervention_analysis` | 干预 utility（相对 original/sham） | 分钟 |
+| `hard` | 在 Base+RKL 都失败的 hard questions 上，用新 seed 生成 FKL 新样本；保存 judge cases | 1–2 h |
+| `entropy` | 调 RKL 温度匹配 FKL 条件熵 | 几秒 |
+| `eval_entropy` | 用 T* 跑一轮 RKL eval | 1–2 h |
 
-- `stage0`：CPU，几分钟；
-- `panel`：40 个前缀 × 4 个模型的 forward，约 5–10 分钟；
-- `entries`：states × 5 entries × 8 samples × 2 个 μ，pilot 约 2–3 小时；
-- `interventions`：states × 5 conditions × 8 samples × 2 个 μ，pilot 约 2–3 小时；
-- `entropy`：几秒。
+> 全量：`MAX_STATES=40 PER_GROUP=10`、`EXTRA_N=12`（pass@16）、`SPAN_TOKENS=3`，
+> 耗时约 12–20 h，建议按下面的分阶段拆。
+
+### 2a — pilot：核心机制（不含 extra/hard/teacher/entropy eval）
 
 ```bash
 %%bash
@@ -73,11 +86,38 @@ export STATE_GROUPS="G1 G2 G3"   # G4 控制组在 v1 已有；v2 的 control �
 export MAX_STATES=20
 export PER_GROUP=5
 export SAMPLES=8
+export SPAN_TOKENS=1
 export STAGES="stage0 panel entries entry_analysis interventions intervention_analysis entropy"
 
 bash "$REPO/scripts/colab/run_exploration_v2.sh" 2>&1 \
   | tee /content/exploration_v2_fixed.log
 ```
+
+### 2b — 全量：所有实验
+
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+export STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+export PAIR=fixed
+export STATE_GROUPS="G1 G2 G3"
+export MAX_STATES=40
+export PER_GROUP=10
+export SAMPLES=8
+export SPAN_TOKENS=3          # 入口是「entry token + teacher greedy 2 tokens」
+export EXTRA_ARMS="base fixedfkl fixedrkl"
+export EXTRA_N=4              # 总样本 8；想 pass@16 可设 12（很贵）
+export HARD_ARMS="fixedfkl"
+export HARD_N=8
+export STAGES="eval_extra stage0 panel entries entries_teacher entry_analysis interventions intervention_analysis hard entropy eval_entropy stage0"
+
+bash "$REPO/scripts/colab/run_exploration_v2.sh" 2>&1 \
+  | tee /content/exploration_v2_full.log
+```
+
+> 末尾的 `stage0` 会在 `eval_entropy` 之后重跑一次，把 `entropy_rkl` 也加进预算表；
+> 它只读文件，几分钟。
 
 ### 断点 / 分阶段
 
@@ -87,17 +127,24 @@ bash "$REPO/scripts/colab/run_exploration_v2.sh" 2>&1 \
 # 1) 先出 stage0 + panel（快）
 export STAGES="stage0 panel"
 
-# 2) 同前缀入口（GPU，约 2–3h pilot）
-export STAGES="entries entry_analysis"
+# 2) 补 32k 样本 → 重新出 stage0（含 pass@8、hard questions）
+export STAGES="eval_extra stage0"
 
-# 3) 软概率干预（GPU，约 2–3h pilot）
+# 3) 同前缀入口 + teacher 上界（GPU）
+export STAGES="entries entries_teacher entry_analysis"
+
+# 4) 软概率干预（GPU）
 export STAGES="interventions intervention_analysis"
 
-# 4) 熵匹配
-export STAGES="entropy"
+# 5) hard questions 新样本（GPU）
+export STAGES="hard"
+
+# 6) 熵匹配 + 可选 RKL eval
+export STAGES="entropy eval_entropy"
 ```
 
-> 想直接跑全量：`MAX_STATES=40 PER_GROUP=10`，耗时约翻倍。
+> 全量 `MAX_STATES=40 PER_GROUP=10` 耗时约翻倍；`EXTRA_N=12` 的 extra eval 很贵，
+> 建议先只对 `base fixedfkl fixedrkl` 做，或只在 100 题的子集上做。
 
 ---
 
@@ -122,7 +169,10 @@ export STATE_GROUPS="G1 G2 G3"
 export MAX_STATES=20
 export PER_GROUP=5
 export SAMPLES=8
-export STAGES="panel entries entry_analysis interventions intervention_analysis entropy"
+export EXTRA_ARMS="base onfkl onrkl"
+export EXTRA_N=4
+export HARD_ARMS="onfkl"
+export STAGES="eval_extra panel entries entries_teacher entry_analysis interventions intervention_analysis entropy"
 
 bash "$REPO/scripts/colab/run_exploration_v2.sh" 2>&1 \
   | tee /content/exploration_v2_online.log
@@ -130,6 +180,8 @@ bash "$REPO/scripts/colab/run_exploration_v2.sh" 2>&1 \
 
 `stage0` online 需要 `counterfactual/onfkl/selection.jsonl` 和 branches；如果还没跑，
 先按 v1 的 Cell 3 用 `PAIR=online` 跑 `branches utility`，或暂时省略 `stage0`。
+有 online branch 文件时，可以把 `stage0 hard` 加进 `STAGES`，得到 online 的 hard questions
+和 FKL 新样本。`eval_entropy` 也可以按需加。
 
 ---
 
@@ -140,9 +192,10 @@ bash "$REPO/scripts/colab/run_exploration_v2.sh" 2>&1 \
 ROOT=/content/drive/MyDrive/outputs/exploration_20261122
 echo "===== STAGE0 ====="; cat "$ROOT/stage0_fixed/STAGE0.md"
 echo; echo "===== PANEL ====="; cat "$ROOT/panel_analysis_fixed/PANEL.md"
+echo; echo "===== HARD ====="; cat "$ROOT/hard_fixed/HARD.md" 2>/dev/null
 echo; echo "===== ENTROPY ====="; cat "$ROOT/entropy_match_fixed/entropy_match.json"
 echo; echo "===== judge files ====="
-find "$ROOT/panel_runs" "$ROOT/stage0_fixed" -path '*/judge/*.jsonl' -printf '%p %s bytes\n' 2>/dev/null | head -20
+find "$ROOT/panel_runs" "$ROOT/stage0_fixed" "$ROOT/hard_fixed" -path '*/judge/*.jsonl' -printf '%p %s bytes\n' 2>/dev/null | head -20
 ```
 
 重点看：

@@ -47,6 +47,9 @@ def parse_args():
     p.add_argument("--out-dir", required=True)
     p.add_argument("--bootstrap", type=int, default=2000)
     p.add_argument("--judge-max", type=int, default=400, help="max texts per arm/bench")
+    p.add_argument("--hard-base", default="base")
+    p.add_argument("--hard-rkl", default="fixedrkl")
+    p.add_argument("--hard-fkl", default="fixedfkl")
     return p.parse_args()
 
 
@@ -134,8 +137,15 @@ def cluster_stats(records, key):
     return {"n": int(len(vals)), "mean": float(vals.mean()), "ci": [lo, hi]}
 
 
+def _order(r):
+    o = r.get("_order")
+    if isinstance(o, (list, tuple)):
+        return (int(o[0]), int(o[1]))
+    return (0, int(r.get("sample", 0)))
+
+
 def cumulative_budget(rows, data_dir):
-    """Per-question cumulative generation-token budget curve."""
+    """Per-question cumulative generation-token budget curve + pass@k."""
     by_q = defaultdict(list)
     for r in rows:
         by_q[int(r["index"])].append(r)
@@ -143,7 +153,7 @@ def cumulative_budget(rows, data_dir):
     for budget in BUDGETS:
         solved = 0
         for q, rs in by_q.items():
-            rs = sorted(rs, key=lambda r: int(r.get("sample", 0)))
+            rs = sorted(rs, key=_order)
             cum = 0
             ok = 0
             for r in rs:
@@ -157,8 +167,15 @@ def cumulative_budget(rows, data_dir):
         out[str(budget)] = solved / max(1, len(by_q))
     out["pass_any"] = sum(any(int(r.get("correct", 0)) for r in rs)
                           for rs in by_q.values()) / max(1, len(by_q))
+    for k in (1, 2, 4, 8, 16):
+        ok = 0
+        for rs in by_q.values():
+            rs = sorted(rs, key=_order)
+            ok += int(any(int(r.get("correct", 0)) for r in rs[:k]))
+        out[f"pass@{k}"] = ok / max(1, len(by_q))
     out["n_questions"] = len(by_q)
     out["n_samples"] = len(rows)
+    out["max_samples_per_q"] = max((len(v) for v in by_q.values()), default=0)
     return out
 
 
@@ -239,26 +256,50 @@ def main():
     # ---------------- cumulative budget ----------------
     if args.eval_arms:
         lines += ["## 2. Per-question cumulative generation-token budget", ""]
-        eval_specs = {s.split("=", 1)[0]: s.split("=", 1)[1] for s in args.eval_arms}
-        header = "| arm | full pass@any | " + " | ".join(f"success@{b}" for b in BUDGETS) + " |"
-        sep = "|---|---:|" + "---:|" * len(BUDGETS)
+        eval_specs = {
+            s.split("=", 1)[0]: s.split("=", 1)[1].split(",") for s in args.eval_arms
+        }
+        header = ("| arm | pass@1 | pass@4 | pass@8 | pass@16 | full pass@any | "
+                  + " | ".join(f"success@{b}" for b in BUDGETS) + " |")
+        sep = "|---|---:|---:|---:|---:|---:|" + "---:|" * len(BUDGETS)
         lines += [header, sep]
-        for arm, arm_dir in eval_specs.items():
-            per_bench = {}
-            for bench in ("aime24", "aime25", "amc23"):
-                p = Path(arm_dir) / f"{bench}.jsonl"
-                rows = C.read_jsonl(p) if p.exists() else []
-                if rows:
-                    per_bench[bench] = rows
+        arm_rows = {}
+        arm_q = {}
+        for arm, arm_dirs in eval_specs.items():
+            per_bench = defaultdict(list)
+            for di, arm_dir in enumerate(arm_dirs):
+                for bench in ("aime24", "aime25", "amc23"):
+                    p = Path(arm_dir) / f"{bench}.jsonl"
+                    rows = C.read_jsonl(p) if p.exists() else []
+                    for r in rows:
+                        r["_order"] = (di, int(r.get("sample", 0)))
+                        r["_bench"] = bench
+                    if rows:
+                        per_bench[bench].extend(rows)
             if not per_bench:
                 continue
+            arm_rows[arm] = per_bench
+            q_acc = {}
+            for bench, rows in per_bench.items():
+                byq = defaultdict(list)
+                for r in rows:
+                    byq[int(r["index"])].append(r)
+                for q, rs in byq.items():
+                    q_acc[(bench, q)] = any(int(r.get("correct", 0)) for r in rs)
+            arm_q[arm] = q_acc
             macro = {b: cumulative_budget(rows, args.data_dir) for b, rows in per_bench.items()}
             result["budget"][arm] = macro
+            pass_cells = []
+            for k in (1, 4, 8, 16):
+                vals = [macro[b][f"pass@{k}"] for b in macro
+                        if macro[b]["max_samples_per_q"] >= k]
+                pass_cells.append(f"{100*np.mean(vals):.1f}" if vals else "—")
             cells = []
             for b in BUDGETS:
                 cells.append(f"{100*np.mean([macro[x][str(b)] for x in macro]):.1f}")
             full = np.mean([macro[x]["pass_any"] for x in macro])
-            lines.append(f"| {arm} | {100*full:.1f} | " + " | ".join(cells) + " |")
+            lines.append(f"| {arm} | " + " | ".join(pass_cells) +
+                         f" | {100*full:.1f} | " + " | ".join(cells) + " |")
             # judge cases: correct samples and hard-question samples
             jpath = judge_dir / f"budget_{arm}.jsonl"
             hard = set()
@@ -283,6 +324,43 @@ def main():
                             f.write(json.dumps(row, ensure_ascii=False) + "\n")
                             n += 1
         lines.append("")
+
+        # Hard questions: Base and RKL both fail in the pre-samples.  This is
+        # an identification step only; independent confirmation must use new
+        # samples (see collect_hard_question_samples.py / hard stage).
+        if args.hard_base in arm_q and args.hard_rkl in arm_q:
+            common = set(arm_q[args.hard_base]) & set(arm_q[args.hard_rkl])
+            hard = sorted([q for q in common
+                           if not arm_q[args.hard_base][q] and not arm_q[args.hard_rkl][q]])
+            C.write_json_atomic(out_dir / "hard_questions.json", {
+                "identified_from": [args.hard_base, args.hard_rkl],
+                "n": len(hard),
+                "questions": [{"bench": b, "index": q} for b, q in hard],
+            })
+            lines += ["## 3. Hard questions (Base and RKL both fail)", "",
+                      f"- identified from: `{args.hard_base}` and `{args.hard_rkl}`",
+                      f"- n questions: {len(hard)}",
+                      "- these are **pre-sample** failures; independent confirmation needs new samples.",
+                      ""]
+            if args.hard_fkl in arm_rows and hard:
+                hset = set(hard)
+                frows = [r for b, rows in arm_rows[args.hard_fkl].items()
+                         for r in rows if (b, int(r["index"])) in hset]
+                correct = sum(int(r.get("correct", 0)) for r in frows)
+                pass_any = len({(b, int(r["index"])) for b, rows in arm_rows[args.hard_fkl].items()
+                                for r in rows if (b, int(r["index"])) in hset
+                                and int(r.get("correct", 0))}) / max(1, len(hard))
+                lines += [f"- `{args.hard_fkl}` pre-sample: {correct}/{len(frows)} correct, "
+                          f"pass@any on hard questions = {100*pass_any:.1f}%", ""]
+                jpath = judge_dir / f"hard_{args.hard_fkl}.jsonl"
+                with open(jpath, "w", encoding="utf-8") as f:
+                    for i, r in enumerate(frows):
+                        if i >= args.judge_max:
+                            break
+                        row = {k: r.get(k) for k in ("index", "sample", "correct", "boxed",
+                                                     "truncated", "tokens", "text")}
+                        row.update({"arm": args.hard_fkl, "bench": r.get("_bench", "")})
+                        f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     C.write_json_atomic(out_dir / "stage0.json", result)
     (out_dir / "STAGE0.md").write_text("\n".join(lines), encoding="utf-8")

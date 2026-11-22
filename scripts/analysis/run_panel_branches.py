@@ -230,35 +230,36 @@ def main():
                     key = (int(st["state_id"]), entry)
                     if key in done:
                         continue
-                    token = None
+                    span = None
                     if entry != "natural":
                         e = st["entries"].get(entry)
                         if not e:
                             continue
-                        token = int(e["token"])
+                        span = e.get("span") or [int(e["token"])]
                     prefix = state_prefix(st, refs)
-                    p = prefix if token is None else prefix + [token]
+                    p = prefix if span is None else prefix + span
                     if len(p) + args.max_new_tokens > args.max_model_len:
                         continue
                     prompts.append({"prompt_token_ids": p})
-                    keys.append((st, entry, token, prefix))
+                    keys.append((st, entry, span, prefix))
             if prompts:
                 outputs = llm.generate(prompts, sp_entry)
-                for (st, entry, token, prefix), req in zip(keys, outputs):
+                for (st, entry, span, prefix), req in zip(keys, outputs):
                     for si, out in enumerate(req.outputs):
                         tids = [int(t) for t in out.token_ids]
-                        if token is None:
+                        if span is None:
                             text = out.text
                             full_ids = tids
                             lps = extract_logprobs(out)
                         else:
-                            text = tokenizer.decode([token] + tids, skip_special_tokens=True)
-                            full_ids = [token] + tids
-                            lps = [None] + (extract_logprobs(out) or [])
+                            text = tokenizer.decode(span + tids, skip_special_tokens=True)
+                            full_ids = span + tids
+                            lps = [None] * len(span) + (extract_logprobs(out) or [])
                         correct, boxed = C.score_text(text, st["ground_truth"])
                         row = {
                             "state_id": int(st["state_id"]), "entry": entry,
-                            "token": token, "mu": args.tag,
+                            "token": span[0] if span else None,
+                            "span": span, "mu": args.tag,
                             "group": st["group"], "bench": st["bench"],
                             "index": int(st["index"]), "sample": int(st["sample"]),
                             "pos": int(st["pos"]), "sample_idx": si,
