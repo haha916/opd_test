@@ -1,5 +1,10 @@
 # Colab v2：同前缀入口 / 软概率干预 / 熵匹配对照
 
+> **新 runtime（`/content` 已清空）**：先跑 `scripts/colab/exploration_cells.md`
+> 的 **Cell 1（mount Drive）** 和 **Cell 2（clone + venv + base 模型 + 数据）**。
+> Drive 上的 `outputs/`（checkpoint、v1/v2 结果）保留，**不需要重训**；
+> v2 的 panel/entries/interventions 都会按已有文件续跑。
+
 在 v1（`exploration_20261122`）的 rollout、candidates、index、已有 eval 之上继续，
 **不重新训练**。v2 做四件事：
 
