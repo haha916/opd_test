@@ -1,5 +1,8 @@
 # Colab：Probability Recovery → Behavioral Adoption → Token Utility
 
+> v2（同前缀入口 / 软概率干预 / 熵匹配对照 / stage-0 聚类分析）见
+> `scripts/colab/exploration_v2_cells.md`。
+
 研究问题：**FKL 局部修复更好，为什么没有带来更好的长时域推理？**
 
 - **Token Recovery**：在 base 访问过的 held-out 状态上，FKL 的全词表修复优势还在吗？

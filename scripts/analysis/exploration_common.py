@@ -248,6 +248,19 @@ def p_bucket(p):
     return "p_T[40,100%]" if p >= 0.4 else "p_T[1,2%)"
 
 
+def delta_bucket(x):
+    x = float(x)
+    if x <= 0:
+        return "Δp<=0"
+    if x < 0.01:
+        return "Δp(0,1%]"
+    if x < 0.05:
+        return "Δp(1,5%]"
+    if x < 0.20:
+        return "Δp(5,20%]"
+    return "Δp>20%"
+
+
 def rel_bucket(pos, length):
     r = float(pos) / max(1.0, float(length))
     for lo, hi, name in REL_BUCKETS:
@@ -316,6 +329,35 @@ def bootstrap_ci(values, n=1000, alpha=0.05, seed=0):
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, len(v), size=(n, len(v)))
     means = v[idx].mean(axis=1)
+    return float(np.quantile(means, alpha / 2)), float(np.quantile(means, 1 - alpha / 2))
+
+
+def cluster_bootstrap_ci(values, clusters, n=2000, alpha=0.05, seed=0):
+    """Bootstrap over independent clusters (e.g. questions), not positions.
+
+    ``values[i]`` belongs to ``clusters[i]``.  Resample clusters with
+    replacement and pool all their values; this keeps within-question
+    correlation intact and gives honest CIs for the utility means.
+    """
+    values = np.asarray(values, dtype=float)
+    cluster_list = list(clusters)
+    keep = np.isfinite(values)
+    values = values[keep]
+    cluster_list = [c for c, k in zip(cluster_list, keep) if k]
+    if len(values) == 0:
+        return (float("nan"), float("nan"))
+    uniq = sorted(set(cluster_list), key=str)
+    if len(uniq) < 2:
+        return bootstrap_ci(values, n=n, alpha=alpha, seed=seed)
+    groups = {c: [] for c in uniq}
+    for v, c in zip(values, cluster_list):
+        groups[c].append(v)
+    rng = np.random.default_rng(seed)
+    means = np.empty(n, dtype=float)
+    for b in range(n):
+        pick = rng.choice(len(uniq), size=len(uniq), replace=True)
+        pooled = np.concatenate([np.asarray(groups[uniq[int(j)]], dtype=float) for j in pick])
+        means[b] = pooled.mean()
     return float(np.quantile(means, alpha / 2)), float(np.quantile(means, 1 - alpha / 2))
 
 
