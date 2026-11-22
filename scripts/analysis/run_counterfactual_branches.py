@@ -200,7 +200,8 @@ def main():
     for spec in args.arm_logp:
         name, path = spec.split("=", 1)
         p_by_arm[name] = load_arm_p(path, n)
-        rank_by_arm[name] = np.asarray(dict(np.load(path, allow_pickle=False))["rank"])
+        d = dict(np.load(path, allow_pickle=False))
+        rank_by_arm[name] = np.asarray(d["rank"]) if "rank" in d else None
     pair = PAIR_ARMS[args.pair]
     for name in pair:
         if name not in p_by_arm:
@@ -235,7 +236,10 @@ def main():
                 "p_base": float(r["p_base"]),
                 "p_after": float(p_by_arm[pair[0]][i]),
                 "p_after_other": float(p_by_arm[pair[1]][i]),
-                "rank_after": int(rank_by_arm[pair[0]][i]) if pair[0] in rank_by_arm else None,
+                "rank_after": (
+                    int(rank_by_arm[pair[0]][i])
+                    if rank_by_arm.get(pair[0]) is not None else None
+                ),
                 "ref_correct": int(r.get("ref_correct", -1)),
                 "ground_truth": str(ref.get("ground_truth", r.get("ground_truth", ""))),
                 "model_path": args.model_path,
