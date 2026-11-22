@@ -1,9 +1,8 @@
 # Colab v2：同前缀入口 / 软概率干预 / 熵匹配对照
 
-> **新 runtime（`/content` 已清空）**：先跑 `scripts/colab/exploration_cells.md`
-> 的 **Cell 1（mount Drive）** 和 **Cell 2（clone + venv + base 模型 + 数据）**。
+> **新 runtime（`/content` 已清空）**：先跑下面的 **Part 0**。
 > Drive 上的 `outputs/`（checkpoint、v1/v2 结果）保留，**不需要重训**；
-> v2 的 panel/entries/interventions 都会按已有文件续跑。
+> v2 的 panel/entries/interventions 都会按已有文件续跑。已有环境则直接跳到 Cell 1。
 
 在 v1（`exploration_20261122`）的 rollout、candidates、index、已有 eval 之上继续，
 **不重新训练**。v2 做四件事：
@@ -19,6 +18,91 @@
 5. **熵匹配 RKL**：同一组 prefix 上调 RKL 温度使条件熵匹配 FKL；可选跑一轮 eval。
 
 需要 LLM/过程 judge 的部分**先只保存文件**到 `judge/`，本阶段不调用 judge。
+
+---
+
+## Part 0 — 新 runtime：挂 Drive + 环境 + base 模型 + 数据
+
+如果 `/content` 已经有 `verl_env`、`models/Qwen3-1.7B`、`models/Qwen3-4B-Instruct-2507`、
+`data/grpo_processed`，跳过 Part 0，直接 Cell 1。
+
+新 runtime 的 `/content` 会清空；Drive 上的 `outputs/`（checkpoint、v1/v2 结果）保留。
+Part 0 只重建临时内容，**不训练**。
+
+### Cell 0a — 挂载 Google Drive
+
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+```
+
+### Cell 0b — clone + venv + base 模型 + 数据
+
+约 30–45 分钟（venv + 11GB 模型 + DAPO/AIME/AMC 数据）。
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+VENV=/content/verl_env
+MODELS=/content/models
+DATA=/content/data
+
+# 1) repo（bootstrap 需要脚本先存在）
+if [ -d "$REPO/.git" ]; then
+  git -C "$REPO" pull --ff-only || true
+else
+  git clone --depth 1 --branch main https://github.com/haha916/opd_test.git "$REPO"
+fi
+git -C "$REPO" log --oneline -1
+
+# 2) venv + vLLM/verl（不下载模型/数据、不训练）
+REPO_DIR="$REPO" VENV_DIR="$VENV" MODEL_ROOT="$MODELS" DATA_DIR="$DATA" \
+INSTALL_ENV=1 DOWNLOAD_MODELS=0 PREPARE_DATA=0 RUN_PIPELINE=0 \
+  bash "$REPO/scripts/colab/bootstrap_colab.sh"
+
+# 3) base 学生 + 教师（训练 checkpoint 继续用 Drive 上的）
+PYTHON="$VENV/bin/python" MODEL_ROOT="$MODELS" \
+STUDENT_ID=Qwen/Qwen3-1.7B \
+TEACHER_ID=Qwen/Qwen3-4B-Instruct-2507 \
+  bash "$REPO/scripts/utils/download_qwen3_models.sh"
+
+# 4) 训练/评测数据：DAPO-Math-17k + MATH-500 + AIME24/25 + AMC23
+REPO_DIR="$REPO" VENV_DIR="$VENV" MODEL_ROOT="$MODELS" DATA_DIR="$DATA" \
+INSTALL_ENV=0 DOWNLOAD_MODELS=0 PREPARE_DATA=1 RUN_PIPELINE=0 \
+  bash "$REPO/scripts/colab/bootstrap_colab.sh"
+
+# 5) 自检
+echo
+echo "=== setup check ==="
+for f in \
+  "$VENV/bin/python" \
+  "$MODELS/Qwen3-1.7B/config.json" \
+  "$MODELS/Qwen3-4B-Instruct-2507/config.json" \
+  "$DATA/grpo_processed/val_aime24.parquet" \
+  "$DATA/grpo_processed/val_aime25.parquet" \
+  "$DATA/grpo_processed/val_amc23.parquet" \
+  "$REPO/assets/fixed_pool/train_64.jsonl" \
+  "$REPO/assets/fixed_pool/train_64_selected.json" \
+  "$REPO/assets/fixed_pool/holdout_64.jsonl" \
+  "$REPO/assets/fixed_pool/holdout_64_selected.json"; do
+  [ -e "$f" ] && echo "OK   $f" || { echo "MISS $f"; exit 1; }
+done
+
+echo
+echo "=== Drive checkpoints (不重训) ==="
+for d in \
+  /content/drive/MyDrive/outputs/fixedfkl60/train/step_0060 \
+  /content/drive/MyDrive/outputs/fixedrkl60/train/step_0060; do
+  [ -f "$d/config.json" ] && echo "OK   $d" || echo "MISS $d"
+done
+find /content/drive/MyDrive/outputs -maxdepth 1 -type d \
+  \( -name "*-onfkl60-OPD-forward_kl-*" -o -name "*-onrkl60-OPD-reverse_kl-*" \) \
+  2>/dev/null | sort | sed 's/^/RUN  /'
+
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+"$VENV/bin/python" -c "import torch,vllm,transformers; print('torch',torch.__version__,'vllm',vllm.__version__,'transformers',transformers.__version__)"
+```
 
 ---
 
