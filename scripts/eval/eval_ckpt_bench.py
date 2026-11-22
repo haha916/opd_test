@@ -62,6 +62,13 @@ def parse_args():
     p.add_argument("--max-num-seqs", type=int, default=128)
     p.add_argument("--max-num-batched-tokens", type=int, default=16384)
     p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="optional sampling seed; use a new seed for independent extra "
+             "samples of the same checkpoint",
+    )
+    p.add_argument(
         "--prompt-mode",
         choices=["tokens", "text"],
         default="tokens",
@@ -180,6 +187,7 @@ def main():
         max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=args.max_num_batched_tokens,
         disable_log_stats=True,
+        seed=args.seed,
     )
     print(f"[vllm] loaded in {time.time() - t_load:.1f}s", flush=True)
 
@@ -192,6 +200,7 @@ def main():
         stop_token_ids=[151645, 151643],
         # 0 = return the sampled token's log-prob (for the logp analysis).
         logprobs=0,
+        seed=args.seed,
     )
 
     all_metrics = {}
@@ -290,6 +299,7 @@ def main():
             "temperature": args.temperature,
             "top_p": args.top_p,
             "top_k": args.top_k,
+            "seed": args.seed,
             "num_questions": nq,
             "num_samples": n_samples_total,
             "acc_mean": sum(p["acc"] for p in per_question) / max(1, nq),
@@ -324,6 +334,7 @@ def main():
         "tag": args.tag,
         "model_path": args.model_path,
         "benchmarks": args.benchmarks,
+        "seed": args.seed,
         "macro_acc_mean": macro_acc,
         "macro_pass_n": macro_pass,
         "per_bench": {
