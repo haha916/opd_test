@@ -1,5 +1,8 @@
 # Colab：60 步 KL 对比（base / on-policy / 固定轨迹 × FKL / RKL）+ 分析
 
+> 后续研究：**Probability Recovery → Behavioral Adoption → Token Utility**
+> （FKL 局部修复为什么没有带来长时域收益）见 `scripts/colab/exploration_cells.md`。
+
 五个评测对象，训练臂均 **60 步**、lr **3e-6**、学生 `Qwen3-1.7B`、教师
 `Qwen3-4B-Instruct-2507`、非 thinking：
 
