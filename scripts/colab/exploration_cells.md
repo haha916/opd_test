@@ -94,7 +94,9 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 ## Cell 3 — 执行
 
 固定配对 `fixedfkl vs fixedrkl`（同一批 64 条轨迹，最干净的对照）。
-后台跑，约 3–5 小时；断线/中断后**重跑同一个 cell**即可续跑。
+**前台运行**（不要 `nohup`/后台）：Colab 只有在 cell 正在执行时才保持 runtime 活跃，
+所以让这个 cell 一直跑到结束；日志同时写到 `/content` 和 Drive 的 `logs/` 下。
+约 3–5 小时；断线/中断后**重跑同一个 cell**即可续跑。
 
 ```bash
 %%bash
@@ -106,10 +108,8 @@ export ARMS="base fixedfkl fixedrkl"
 export CAND_ARMS="fixedfkl fixedrkl"
 export STAGES="rollouts_ref rollouts_arms candidates index adoption branches utility budget summary"
 
-nohup bash "$REPO/scripts/colab/run_exploration_study.sh" \
-  > /content/exploration_fixed.log 2>&1 &
-echo "started pid=$!"
-echo "monitor: tail -f /content/exploration_fixed.log"
+bash "$REPO/scripts/colab/run_exploration_study.sh" 2>&1 \
+  | tee /content/exploration_fixed.log
 ```
 
 跑完看：
