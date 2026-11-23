@@ -174,9 +174,15 @@ done
 
 echo
 echo "##### judge files"
-find "$STUDY_ROOT/panel_runs" "$STUDY_ROOT/stage0_fixed" "$STUDY_ROOT/stage0_online" \
-     "$STUDY_ROOT/hard_fixed" "$STUDY_ROOT/hard_online" \
-  -path '*/judge/*.jsonl' -printf '%p %s bytes\n' 2>/dev/null | head -30
+judge_dirs=()
+for d in "$STUDY_ROOT/panel_runs" "$STUDY_ROOT/stage0_fixed" "$STUDY_ROOT/stage0_online" \
+         "$STUDY_ROOT/hard_fixed" "$STUDY_ROOT/hard_online"; do
+  [ -d "$d" ] && judge_dirs+=("$d")
+done
+if [ ${#judge_dirs[@]} -gt 0 ]; then
+  # find 的起始目录缺一个就以非零退出；pipefail 下会让整个 cell 报错，故只用存在的
+  find "${judge_dirs[@]}" -path '*/judge/*.jsonl' -printf '%p %s bytes\n' 2>/dev/null | head -30 || true
+fi
 ```
 
 ---
@@ -207,3 +213,215 @@ find "$STUDY_ROOT/panel_runs" "$STUDY_ROOT/stage0_fixed" "$STUDY_ROOT/stage0_onl
 - `EXTRA_N=12`（pass@16）很贵；先 4，确认信号后再加。
 - pilot 20 states / 每组 5 个，CI 仍宽；再看 40/10 全量。
 - online 需要 v1 online 的 rollout/candidates；没有则 fixed 跑完后提示跳过。
+
+---
+
+# Part 2 — 恢复 token 的 gain/lose 分支实验（fixed 结果之后）
+
+> ⚠️ 旧 intervention 从 `state["R"]` 读集合，而 panel 存在 `state["entries"]["R"]`，
+> 所以旧的 withdraw/inject 条件全是空操作，`PANEL.md` 的 intervention 表不能引用。
+> 15 个 panel 前缀中 13 个有 FKL 独有恢复集 R；R 的质量 FKL **2.88%** vs RKL
+> **0.57%**（差 **2.31pp**）。新实验在自然前缀上比较“强制 R 中按 Δp 抽的 token”
+> 与“强制 Δp<0 中按 −Δp 抽的 token”，同一续写模型（先 FKL 后 RKL）×8 样本。
+
+完整说明、口径和结果解读见 `scripts/colab/recovery_branch_cells.md`。
+
+> **Colab 每次新任务都是新 runtime**：先跑 Part 0 的 Cell 0a/0b（挂 Drive、
+> clone/pull、建 `/content/verl_env`、下载模型和数据）。下面的每个 cell 都显式
+> 定义 `PY=/content/verl_env/bin/python` 并检查路径，不依赖上一次 runtime 的
+> shell 变量或已安装的包。
+
+## Cell R0 — 新 runtime 预检
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+
+[ -d /content/drive/MyDrive ] || { echo "Drive 未挂载：先跑 Part 0 Cell 0a"; exit 1; }
+[ -d "$REPO/.git" ] || { echo "缺 repo：先跑 Part 0 Cell 0b"; exit 1; }
+[ -x "$PY" ] || { echo "缺 $PY：先跑 Part 0 Cell 0b"; exit 1; }
+
+git -C "$REPO" pull --ff-only
+git -C "$REPO" log --oneline -1
+
+for f in \
+  /content/models/Qwen3-1.7B/config.json \
+  /content/models/Qwen3-4B-Instruct-2507/config.json \
+  /content/data/grpo_processed/val_aime24.parquet \
+  "$STUDY_ROOT/panel_fixed/states.jsonl" \
+  "$STUDY_ROOT/panel_fixed/distributions.npz" \
+  "$STUDY_ROOT/rollouts/fixedfkl" \
+  "$STUDY_ROOT/rollouts/fixedrkl" \
+  "$REPO/scripts/analysis/validate_interventions.py" \
+  "$REPO/scripts/analysis/collect_recovery_states.py" \
+  "$REPO/scripts/analysis/run_gain_lose_branches.py" \
+  "$REPO/scripts/analysis/analyze_gain_lose.py" \
+  /content/drive/MyDrive/outputs/fixedfkl60/train/step_0060/config.json \
+  /content/drive/MyDrive/outputs/fixedrkl60/train/step_0060/config.json; do
+  [ -e "$f" ] || { echo "MISSING $f — 先跑 Part 0 setup 或 commit/push 新脚本后 git pull"; exit 1; }
+done
+
+"$PY" -c "import numpy, torch, transformers, vllm; print('env OK')"
+```
+
+## Cell R1 — CPU：修正后的干预验收（不用 GPU）
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+
+"$PY" -I "$REPO/scripts/analysis/validate_interventions.py" \
+  --states "$STUDY_ROOT/panel_fixed/states.jsonl" \
+  --distributions "$STUDY_ROOT/panel_fixed/distributions.npz" \
+  --tokenizer-path /content/models/Qwen3-1.7B \
+  --out-dir "$STUDY_ROOT/intervention_check" --strict
+cat "$STUDY_ROOT/intervention_check/INTERVENTION_CHECK.md"
+```
+
+应看到 `R non-empty: 13 / 15`、`withdraw_R`/`inject_R` 方向正确、2 个空 R 状态不变、
+`max stop dev = 0`、`|sum-1| < 1e-15`、结果 **PASS**。
+
+## Cell R2 — CPU：固定选点 dry-run（不加载模型）
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+
+"$PY" -I "$REPO/scripts/analysis/collect_recovery_states.py" \
+  --rollouts "fkl=$STUDY_ROOT/rollouts/fixedfkl" \
+             "rkl=$STUDY_ROOT/rollouts/fixedrkl" \
+  --teacher-path /content/models/Qwen3-4B-Instruct-2507 \
+  --base-model /content/models/Qwen3-1.7B \
+  --fkl-model /content/drive/MyDrive/outputs/fixedfkl60/train/step_0060 \
+  --rkl-model /content/drive/MyDrive/outputs/fixedrkl60/train/step_0060 \
+  --tokenizer-path /content/models/Qwen3-1.7B \
+  --questions-per-bench 12 12 8 \
+  --position-fracs 0.25 0.5 0.75 \
+  --gain-set R --pool-per-branch 32 \
+  --max-per-question 2 --max-states 80 \
+  --max-new-tokens 16384 --max-model-len 34000 \
+  --seed 20261123 --dry-run \
+  --out-dir "$STUDY_ROOT/recovery_plan"
+
+cat "$STUDY_ROOT/recovery_plan/selected_questions.json"
+head -5 "$STUDY_ROOT/recovery_plan/planned.jsonl"
+```
+
+确认题号和位置后再跑 GPU；选点不使用 correctness。
+
+## Cell R3 — GPU：收集前缀 + 两个续写模型的分支
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+
+# 3a) 收集自然前缀、R/P、gain/lose token 池（去掉 --dry-run，换 out-dir）
+"$PY" -I "$REPO/scripts/analysis/collect_recovery_states.py" \
+  --rollouts "fkl=$STUDY_ROOT/rollouts/fixedfkl" \
+             "rkl=$STUDY_ROOT/rollouts/fixedrkl" \
+  --teacher-path /content/models/Qwen3-4B-Instruct-2507 \
+  --base-model /content/models/Qwen3-1.7B \
+  --fkl-model /content/drive/MyDrive/outputs/fixedfkl60/train/step_0060 \
+  --rkl-model /content/drive/MyDrive/outputs/fixedrkl60/train/step_0060 \
+  --tokenizer-path /content/models/Qwen3-1.7B \
+  --questions-per-bench 12 12 8 \
+  --position-fracs 0.25 0.5 0.75 \
+  --gain-set R --pool-per-branch 32 \
+  --max-per-question 2 --max-states 80 \
+  --max-new-tokens 16384 --max-model-len 34000 \
+  --seed 20261123 \
+  --out-dir "$STUDY_ROOT/recovery_states"
+
+# 3b) 同一前缀、同一入口：Fixed FKL 与 Fixed RKL 各 8 次
+for arm in fkl rkl; do
+  if [ "$arm" = "fkl" ]; then
+    MODEL=/content/drive/MyDrive/outputs/fixedfkl60/train/step_0060
+  else
+    MODEL=/content/drive/MyDrive/outputs/fixedrkl60/train/step_0060
+  fi
+  "$PY" -I "$REPO/scripts/analysis/run_gain_lose_branches.py" \
+    --states "$STUDY_ROOT/recovery_states/states.jsonl" \
+    --model-path "$MODEL" --tokenizer-path /content/models/Qwen3-1.7B \
+    --tag "$arm" --out-dir "$STUDY_ROOT/recovery_runs/$arm" \
+    --samples-per-branch 8 --max-new-tokens 16384 --max-model-len 34000 \
+    --seed 0
+done
+```
+
+## Cell R4 — CPU：分支效应/分解 + 盲评导出
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+
+"$PY" -I "$REPO/scripts/analysis/analyze_gain_lose.py" \
+  --states "$STUDY_ROOT/recovery_states/states.jsonl" \
+  --examined "$STUDY_ROOT/recovery_states/examined.jsonl" \
+  --runs "fkl=$STUDY_ROOT/recovery_runs/fkl/gain_lose_fkl.jsonl" \
+         "rkl=$STUDY_ROOT/recovery_runs/rkl/gain_lose_rkl.jsonl" \
+  --out-dir "$STUDY_ROOT/recovery_analysis"
+cat "$STUDY_ROOT/recovery_analysis/GAIN_LOSE.md"
+
+# hard 校准盲评（10 条正确 + 同题失败）
+"$PY" -I "$REPO/scripts/analysis/export_blind_review.py" --mode hard \
+  --samples "$STUDY_ROOT/hard_samples/fixedfkl_seed999.jsonl" \
+  --data-dir /content/data/grpo_processed \
+  --n-correct 10 --n-wrong 1 --seed 0 \
+  --out-dir "$STUDY_ROOT/hard_review"
+
+# gain/lose 分支盲评
+for arm in fkl rkl; do
+  "$PY" -I "$REPO/scripts/analysis/export_blind_review.py" --mode branches \
+    --samples "$STUDY_ROOT/recovery_runs/$arm/gain_lose_$arm.jsonl" \
+    --data-dir /content/data/grpo_processed \
+    --n-per-group 4 --max-questions 8 --seed 0 \
+    --out-dir "$STUDY_ROOT/branch_review_$arm"
+done
+```
+
+也可一条命令跑前四步：
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+
+STAGES="check collect branches analyze" \
+PYTHON="$PY" STUDY_ROOT="$STUDY_ROOT" \
+  bash "$REPO/scripts/colab/run_recovery_branch_study.sh"
+```
+
+修正后的 panel 干预表（可选，独立 `_v2` 目录）：
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+
+STAGES=intervention_v2 \
+PYTHON="$PY" STUDY_ROOT="$STUDY_ROOT" \
+  bash "$REPO/scripts/colab/run_recovery_branch_study.sh"
+```
+
+主要读数：`GAIN_LOSE.md` 的 **branch effect (gain − lose)** 和
+**natural-frequency contribution**；前者回答“恢复入口值不值”，后者按自然出现
+频率加权。若 gain 更好但自然贡献很小，再研究入口为什么很少被走到。

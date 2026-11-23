@@ -222,18 +222,43 @@ stage_entries_teacher() {
     --max-num-seqs "$MAX_NUM_SEQS"
 }
 
-stage_entry_analysis() {
-  local specs=() f
-  for a in "$FKL_ARM" "$RKL_ARM"; do
+# analyze_panel.py rewrites PANEL.md from whatever inputs it receives, so both
+# analysis stages must pass both spec sets (otherwise the later stage erases the
+# other section).
+collect_entry_specs() {
+  ENTRY_SPECS=()
+  local a f
+  for a in "$FKL_ARM" "$RKL_ARM" teacher; do
     f="$PANEL_RUNS/entry_${a}/entry_${a}.jsonl"
-    [ -f "$f" ] && specs+=("$a=$f")
+    [ -f "$f" ] && ENTRY_SPECS+=("$a=$f")
   done
-  f="$PANEL_RUNS/entry_teacher/entry_teacher.jsonl"
-  [ -f "$f" ] && specs+=("teacher=$f")
-  [ ${#specs[@]} -gt 0 ] || die "no entry branch files (run entries first)"
+}
+
+collect_intervention_specs() {
+  INTERVENTION_SPECS=()
+  local role a dir f
+  for role in fkl rkl; do
+    if [ "$role" = "fkl" ]; then a="$FKL_ARM"; else a="$RKL_ARM"; fi
+    # prefer the corrected _v2 run; the original intervention files were a no-op
+    for dir in "$PANEL_RUNS/intervention_${a}_v2" "$PANEL_RUNS/intervention_${a}"; do
+      f="$dir/intervention_${a}.jsonl"
+      if [ -f "$f" ]; then
+        INTERVENTION_SPECS+=("$role=$f")
+        break
+      fi
+    done
+  done
+}
+
+stage_entry_analysis() {
+  collect_entry_specs
+  collect_intervention_specs
+  [ ${#ENTRY_SPECS[@]} -gt 0 ] || die "no entry branch files (run entries first)"
+  local extra=()
+  [ ${#INTERVENTION_SPECS[@]} -gt 0 ] && extra=(--intervention "${INTERVENTION_SPECS[@]}")
   run_logged entry_analysis "$PY" -I "$REPO/scripts/analysis/analyze_panel.py" \
     --states "$PANEL_DIR/states.jsonl" \
-    --entry "${specs[@]}" \
+    --entry "${ENTRY_SPECS[@]}" "${extra[@]}" \
     --out-dir "$ANALYSIS_DIR"
 }
 
@@ -259,16 +284,15 @@ stage_interventions() {
 }
 
 stage_intervention_analysis() {
-  local specs=() f role
-  for role in fkl rkl; do
-    if [ "$role" = "fkl" ]; then a="$FKL_ARM"; else a="$RKL_ARM"; fi
-    f="$PANEL_RUNS/intervention_${a}/intervention_${a}.jsonl"
-    [ -f "$f" ] && specs+=("$role=$f")
-  done
-  [ ${#specs[@]} -gt 0 ] || die "no intervention files (run interventions first)"
+  collect_entry_specs
+  collect_intervention_specs
+  [ ${#INTERVENTION_SPECS[@]} -gt 0 ] || die "no intervention files (run interventions first)"
+  local extra=()
+  [ ${#ENTRY_SPECS[@]} -gt 0 ] && extra=(--entry "${ENTRY_SPECS[@]}")
   run_logged intervention_analysis "$PY" -I "$REPO/scripts/analysis/analyze_panel.py" \
     --states "$PANEL_DIR/states.jsonl" \
-    --intervention "${specs[@]}" \
+    "${extra[@]}" \
+    --intervention "${INTERVENTION_SPECS[@]}" \
     --out-dir "$ANALYSIS_DIR"
 }
 

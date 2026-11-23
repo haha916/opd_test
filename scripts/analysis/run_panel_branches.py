@@ -47,6 +47,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import exploration_common as C  # noqa: E402
+import intervention_utils as IU  # noqa: E402
 
 
 def parse_args():
@@ -124,39 +125,8 @@ def completed_keys(path, samples):
     return done, [r for r in rows if (int(r["state_id"]), r.get("entry", r.get("condition"))) in done]
 
 
-def build_modified(p_mu, p_other, target, special, eos_ids, mode, sham=False):
-    """Return a modified first-token distribution with EOS mass fixed."""
-    p = p_mu.astype(np.float64).copy()
-    p = np.maximum(p, 0.0)
-    p_eos = float(p[eos_ids].sum())
-    content = ~special
-    content[eos_ids] = False
-    target = np.asarray([t for t in target if content[t]], dtype=np.int64)
-    p_new = p.copy()
-    if sham and len(target):
-        # matched non-target set: closest p_mu values, same size
-        pool = np.where(content)[0]
-        pool = pool[~np.isin(pool, target)]
-        if len(pool):
-            order = pool[np.argsort(np.abs(p[pool] - np.median(p[target])))]
-            sh = order[:len(target)]
-            rel = 0.0
-            base_mass = float(p[target].sum())
-            if base_mass > 0:
-                rel = (float(p_other[target].sum()) / base_mass) - 1.0
-            p_new[sh] = p[sh] * max(0.0, 1.0 + rel)
-    elif len(target):
-        p_new[target] = p_other[target]
-    # keep EOS fixed, zero specials, renormalise content
-    p_new[special] = 0.0
-    p_new[eos_ids] = p[eos_ids]
-    csum = float(p_new[content].sum())
-    if csum > 0:
-        p_new[content] *= (1.0 - p_eos) / csum
-    p_new[eos_ids] = p_eos
-    p_new = np.maximum(p_new, 0.0)
-    p_new = p_new / max(1e-12, p_new.sum())
-    return p_new, p_eos
+# Probability surgery lives in intervention_utils.build_condition; the old
+# local build_modified() read R/P from the wrong place and is removed.
 
 
 def main():
@@ -180,17 +150,36 @@ def main():
     C.log(f"{args.mode}: {len(states)} states, mu={args.tag}")
 
     distributions = None
+    dist_row = {}
     if args.mode == "intervention":
         distributions = dict(np.load(Path(args.states).parent / "distributions.npz",
                                      allow_pickle=False))
         vocab = distributions["fkl"].shape[1]
+        dist_row = {int(sid): i for i, sid in enumerate(distributions["state_id"])}
         special = np.zeros(vocab, dtype=bool)
         for tid in set(tokenizer.all_special_ids):
             if 0 <= int(tid) < vocab:
                 special[int(tid)] = True
         eos_ids = np.asarray([t for t in C.QWEN_STOP_IDS if t < vocab], dtype=np.int64)
+        with_targets = sum(
+            1 for st in states
+            if IU.resolve_entry_tokens(st, "R") or IU.resolve_entry_tokens(st, "P"))
+        C.log(f"intervention targets: {with_targets}/{len(states)} states have R or P")
+        if with_targets == 0:
+            raise SystemExit(
+                "intervention targets are empty for every state: the states do not "
+                "carry entries.R/entries.P (old runs read state['R']/state['P'])")
+        missing = [int(st["state_id"]) for st in states
+                   if int(st["state_id"]) not in dist_row]
+        if missing:
+            raise SystemExit(f"states missing from distributions.npz: {missing[:5]}")
 
     done, existing = completed_keys(out_path, args.samples) if args.resume else (set(), [])
+    audit_path = out_dir / "intervention_mass.jsonl"
+    audit = {}
+    if args.mode == "intervention" and args.resume and audit_path.exists():
+        for r in C.read_jsonl(audit_path):
+            audit[(int(r["state_id"]), r["condition"])] = r
     if args.force:
         done, existing = set(), []
     C.log(f"resume: {len(done)} complete keys")
@@ -278,10 +267,11 @@ def main():
             keys = []
             for st in chunk:
                 si = int(st["state_id"])
-                p_mu = distributions["fkl"][si] if args.model_role == "fkl" else distributions["rkl"][si]
-                p_other = distributions["rkl"][si] if args.model_role == "fkl" else distributions["fkl"][si]
-                R = [int(e["token"]) for e in st.get("R", [])]
-                P = [int(e["token"]) for e in st.get("P", [])]
+                row = dist_row[si]
+                p_mu = distributions["fkl"][row] if args.model_role == "fkl" else distributions["rkl"][row]
+                p_other = distributions["rkl"][row] if args.model_role == "fkl" else distributions["fkl"][row]
+                R = IU.resolve_entry_tokens(st, "R")
+                P = IU.resolve_entry_tokens(st, "P")
                 conditions = ["original"]
                 if args.model_role == "fkl":
                     conditions += ["withdraw_R", "withdraw_P", "withdraw_both", "sham"]
@@ -293,21 +283,29 @@ def main():
                     if key in done:
                         continue
                     if cond == "original":
-                        p_new, p_eos = build_modified(p_mu, p_other, [], special, eos_ids,
-                                                      args.model_role, sham=False)
+                        target = []
                     elif cond.endswith("_R"):
-                        p_new, p_eos = build_modified(p_mu, p_other, R, special, eos_ids,
-                                                      args.model_role, sham=False)
+                        target = R
                     elif cond.endswith("_P"):
-                        p_new, p_eos = build_modified(p_mu, p_other, P, special, eos_ids,
-                                                      args.model_role, sham=False)
+                        target = P
                     elif cond.endswith("_both"):
-                        p_new, p_eos = build_modified(p_mu, p_other, sorted(set(R + P)),
-                                                      special, eos_ids, args.model_role,
-                                                      sham=False)
+                        target = sorted(set(R + P))
                     else:
-                        p_new, p_eos = build_modified(p_mu, p_other, R, special, eos_ids,
-                                                      args.model_role, sham=True)
+                        target = R
+                    p_new, info = IU.build_condition(
+                        p_mu, p_other, target, special, eos_ids,
+                        sham=(cond == "sham"))
+                    p_eos = float(info["p_eos"])
+                    audit[(si, cond)] = {
+                        "state_id": si, "condition": cond,
+                        "model_role": args.model_role, "mu": args.tag,
+                        "group": st["group"], "n_target": int(info["n_target"]),
+                        "target_before": float(info["target_before"]),
+                        "target_after": float(info["target_after"]),
+                        "moved": float(info["moved"]),
+                        "p_eos": p_eos, "sum": float(info["sum"]),
+                        "sham": bool(info.get("sham", False)),
+                    }
                     rng = np.random.default_rng(args.seed + si * 1009 + ci * 9176)
                     firsts = rng.choice(len(p_new), size=args.samples, p=p_new / p_new.sum())
                     for fi, tok in enumerate(firsts):
@@ -316,10 +314,10 @@ def main():
                         if len(p) + args.max_new_tokens > args.max_model_len:
                             continue
                         prompts.append({"prompt_token_ids": p})
-                        keys.append((st, cond, tok, prefix, float(p_eos), fi))
+                        keys.append((st, cond, tok, prefix, p_eos, fi, info))
             if prompts:
                 outputs = llm.generate(prompts, sp_one)
-                for (st, cond, tok, prefix, p_eos, fi), req in zip(keys, outputs):
+                for (st, cond, tok, prefix, p_eos, fi, info), req in zip(keys, outputs):
                     out = req.outputs[0]
                     tids = [int(t) for t in out.token_ids]
                     text = tokenizer.decode([tok] + tids, skip_special_tokens=True)
@@ -338,6 +336,10 @@ def main():
                         "response_ids": [tok] + tids,
                         "token_logprobs": [None] + (extract_logprobs(out) or []),
                         "p_eos": p_eos,
+                        "target_n": int(info["n_target"]),
+                        "target_before": float(info["target_before"]),
+                        "target_after": float(info["target_after"]),
+                        "moved_mass": float(info["moved"]),
                     }
                     new_main.append(row)
                     new_judge.append(row)
@@ -350,6 +352,8 @@ def main():
                 for r in new_judge:
                     j = {k: r[k] for k in r if k not in ("response_ids", "token_logprobs")}
                     f.write(json.dumps(j, ensure_ascii=False) + "\n")
+        if audit:
+            C.write_jsonl_atomic(audit_path, list(audit.values()))
         C.log(f"chunk {start // args.chunk + 1}/{((len(states)-1)//args.chunk)+1}: "
               f"{len(new_main)} outputs, elapsed={time.time()-t0:.0f}s")
 
