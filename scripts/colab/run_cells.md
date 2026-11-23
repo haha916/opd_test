@@ -362,29 +362,12 @@ for arm in fkl rkl; do
 done
 ```
 
-## Cell O5 — v1 反事实分支盲评（natural/forced/suppressed）
-
-```bash
-%%bash
-set -euo pipefail
-REPO=/content/OPSD_OnPolicyDistillation
-PY=/content/verl_env/bin/python
-STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
-OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
-
-"$PY" -I "$REPO/scripts/analysis/export_blind_review.py" --mode v1 \
-  --samples "$STUDY_ROOT/counterfactual/fixedfkl/branches_fixedfkl.jsonl" \
-  --data-dir /content/data/grpo_processed \
-  --n-per-group 3 --max-questions 6 --seed 0 \
-  --out-dir "$OUT_ROOT/v1_review"
-```
-
 ---
 
 # 本地（不是 Colab）：盲评汇总
 
-把 `hard_review/`、`branch_review_*/`、`v1_review/` 从 Drive 下载到当前目录，
-填好各自的 `blind_annotations.jsonl`，然后运行：
+把 `hard_review/`、`branch_review_*/` 从 Drive 下载到当前目录，填好各自的
+`blind_annotations.jsonl`，然后运行：
 
 ```bash
 python -I scripts/analysis/score_blind_review.py \
@@ -410,16 +393,36 @@ for arm in fkl rkl; do
     --out-dir branch_review_allgain_$arm
 done
 
-if [ -d v1_review ]; then
-  python -I scripts/analysis/score_blind_review.py \
-    --annotations v1_review/blind_annotations.jsonl \
-    --key v1_review/blind_key.json \
-    --positive-group forced --negative-group natural \
-    --out-dir v1_review/forced_vs_natural
-  python -I scripts/analysis/score_blind_review.py \
-    --annotations v1_review/blind_annotations.jsonl \
-    --key v1_review/blind_key.json \
-    --positive-group suppressed --negative-group natural \
-    --out-dir v1_review/suppressed_vs_natural
-fi
+```
+
+## v1 反事实分支盲评（本地 CPU，不需要 GPU / Colab）
+
+v1 的 `branches_fixedfkl.jsonl` 只有 natural/forced；用 `target_first` 把 natural
+拆成“自然选中 v*”（natural）和“自然没选中 v*”（suppressed），三组盲评。
+在 repo 根目录运行：
+
+```bash
+python -I scripts/analysis/export_blind_review.py --mode v1 \
+  --samples scripts/colab/exploration_20261122/counterfactual/fixedfkl/branches_fixedfkl.jsonl \
+  --data-dir /root/autodl-tmp/models/datasets/grpo_processed \
+  --n-per-group 3 --max-questions 6 --seed 0 \
+  --out-dir v1_review
+```
+
+（没有 pandas 时会自动用 pyarrow；本机已装 pyarrow。）
+
+填 `v1_review/blind_annotations_template.jsonl` → `blind_annotations.jsonl`，
+然后：
+
+```bash
+python -I scripts/analysis/score_blind_review.py \
+  --annotations v1_review/blind_annotations.jsonl \
+  --key v1_review/blind_key.json \
+  --positive-group forced --negative-group natural \
+  --out-dir v1_review/forced_vs_natural
+python -I scripts/analysis/score_blind_review.py \
+  --annotations v1_review/blind_annotations.jsonl \
+  --key v1_review/blind_key.json \
+  --positive-group suppressed --negative-group natural \
+  --out-dir v1_review/suppressed_vs_natural
 ```

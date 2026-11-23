@@ -14,9 +14,10 @@ Three modes:
     final-answer correctness.
 
   v1 (counterfactual branches)
-    Sample natural / forced / suppressed rows from the v1
-    ``branches_fixedfkl.jsonl``; score forced vs natural and suppressed vs
-    natural with the same three labels.
+    The v1 branches file has natural and forced rows only.  ``target_first``
+    splits natural into natural-v* (target_first=1) and natural-not-v*
+    (target_first=0); blind forced / natural-v* / natural-not-v* and score
+    forced vs natural-v* and natural-not-v* vs natural-v*.
 
 The reviewer answers three binary questions about the first complete
 mathematical step:
@@ -32,6 +33,7 @@ until annotation is finished.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -73,11 +75,56 @@ def question_text(q):
     return "\n\n".join(parts)
 
 
+KEEP_FIELDS = (
+    "bench", "index", "sample", "pos", "group", "branch", "text",
+    "correct", "v_star", "target_first", "state_id", "token", "token_delta",
+    "tokens", "truncated", "ground_truth", "seed", "model_path", "tag",
+)
+
+
+def read_rows_compact(path):
+    """Read only the fields the review needs (drops 16k response_ids)."""
+    rows = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            rows.append({k: r.get(k) for k in KEEP_FIELDS if k in r})
+    return rows
+
+
+def load_questions_any(data_dir, benchmarks):
+    """pandas loader if available, else pyarrow (works locally without pandas)."""
+    try:
+        return C.load_questions(data_dir, benchmarks)
+    except Exception as exc:  # noqa: BLE001
+        C.log(f"pandas loader unavailable ({type(exc).__name__}); using pyarrow")
+        import pyarrow.parquet as pq
+
+        out = {}
+        for bench in benchmarks:
+            path = Path(data_dir) / C.BENCH_FILES[bench]
+            if not path.exists():
+                raise SystemExit(f"missing benchmark parquet: {path}")
+            table = pq.read_table(path).to_pylist()
+            out[bench] = [
+                {
+                    "index": i,
+                    "messages": [dict(m) for m in row["prompt"]],
+                    "ground_truth": row["reward_model"]["ground_truth"],
+                }
+                for i, row in enumerate(table)
+            ]
+        return out
+
+
 def qmap_from(data_dir, benchmarks):
     if not data_dir:
         C.log("no --data-dir: question text will be empty (smoke test only)")
         return {}
-    questions = C.load_questions(data_dir, benchmarks)
+    questions = load_questions_any(data_dir, benchmarks)
     return {(b, int(q["index"])): q for b, qs in questions.items() for q in qs}
 
 
@@ -128,13 +175,28 @@ def branch_cases(rows, args, rng):
 
 
 def v1_cases(rows, args, rng):
-    """v1 counterfactual branches: natural / forced / suppressed."""
+    """v1 counterfactuals: forced vs natural-v* vs natural-not-v*.
+
+    The v1 branches file has only natural and forced rows.  ``target_first``
+    tells whether a natural sample picked the teacher token v*.  We therefore
+    define disjoint groups:
+      forced      = forced-v* branches;
+      natural     = natural branches with target_first == 1;
+      suppressed  = natural branches with target_first == 0.
+    """
     by_q = defaultdict(lambda: defaultdict(list))
     for r in rows:
         br = r.get("branch")
-        if br not in ("natural", "forced", "suppressed"):
+        if br == "forced":
+            grp = "forced"
+        elif br == "natural":
+            tf = r.get("target_first")
+            if tf is None:
+                continue
+            grp = "natural" if int(tf) == 1 else "suppressed"
+        else:
             continue
-        by_q[(r["bench"], int(r["index"]))][br].append(r)
+        by_q[(r["bench"], int(r["index"]))][grp].append(r)
     qs = [q for q, d in by_q.items()
           if all(d.get(b) for b in ("natural", "forced", "suppressed"))]
     qs.sort()
@@ -158,7 +220,7 @@ def main():
     rng = np.random.default_rng(args.seed)
 
     qmap = qmap_from(args.data_dir, args.benchmarks)
-    rows = [r for r in C.read_jsonl(args.samples)
+    rows = [r for r in read_rows_compact(args.samples)
             if r.get("bench") in args.benchmarks]
     if args.mode == "hard":
         cases = hard_cases(rows, args, rng)
@@ -191,6 +253,7 @@ def main():
             "correct": int(r.get("correct", 0)),
             "branch": r.get("branch"),
             "v1_group": r.get("group"),
+            "target_first": r.get("target_first"),
             "state_id": r.get("state_id"),
             "pos": r.get("pos"),
             "token": r.get("token"),
@@ -238,7 +301,9 @@ annotating.
 After annotation, join with the key.  Use `--positive-group` /
 `--negative-group` matching the hidden groups: hard = `correct`/`wrong`;
 recovery branches = `gain`/`lose`; v1 counterfactual branches = run the
-scorer twice, `forced` vs `natural` and `suppressed` vs `natural`.
+scorer twice, `forced` vs `natural` and `suppressed` vs `natural`, where
+v1 `natural` = natural samples that picked v* (target_first=1) and
+`suppressed` = natural samples that did not (target_first=0).
 
 ```bash
 python -I scripts/analysis/score_blind_review.py \\
