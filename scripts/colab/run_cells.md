@@ -183,28 +183,213 @@ for arm in fkl rkl; do
 done
 ```
 
-## Cell 5 — 盲评汇总（填完 annotations 后运行）
+---
+
+# 可选实验（每个 cell 都是直接可用的）
+
+## Cell O1 — 全量 panel（40/10）+ pass@16（EXTRA_N=12）
+
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2_full
+mkdir -p "$OUT_ROOT"
+
+git -C "$REPO" pull --ff-only
+export PYTHON="$PY"
+export STUDY_ROOT OUT_ROOT
+export PAIR=fixed
+export STATE_GROUPS="G1 G2 G3"
+export MAX_STATES=40
+export PER_GROUP=10
+export SAMPLES=8
+export SPAN_TOKENS=3
+export EXTRA_ARMS="base fixedfkl fixedrkl"
+export EXTRA_N=12
+export EXTRA_SEED=5678
+export HARD_ARMS="fixedfkl"
+export HARD_N=8
+export STAGES="eval_extra stage0 panel entries entries_teacher entry_analysis interventions intervention_analysis hard entropy eval_entropy stage0"
+
+bash "$REPO/scripts/colab/run_exploration_v2.sh"
+
+for pair in fixed; do
+  root="$OUT_ROOT"
+  echo
+  echo "##### $pair · STAGE0"
+  [ -f "$root/stage0_$pair/STAGE0.md" ] && cat "$root/stage0_$pair/STAGE0.md" || echo "(missing)"
+  echo
+  echo "##### $pair · PANEL"
+  [ -f "$root/panel_analysis_$pair/PANEL.md" ] && cat "$root/panel_analysis_$pair/PANEL.md" || echo "(missing)"
+  echo
+  echo "##### $pair · HARD"
+  [ -f "$root/hard_$pair/HARD.md" ] && cat "$root/hard_$pair/HARD.md" || echo "(missing)"
+  echo
+  echo "##### $pair · ENTROPY"
+  [ -f "$root/entropy_match_$pair/entropy_match.json" ] && cat "$root/entropy_match_$pair/entropy_match.json" || echo "(missing)"
+done
+```
+
+## Cell O2 — online pair（缺 v1 online 产物时自动先补）
+
+```bash
+%%bash
+set -uo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
+mkdir -p "$OUT_ROOT"
+
+git -C "$REPO" pull --ff-only
+
+if [ ! -f "$STUDY_ROOT/candidates/arm_top1_onfkl.npz" ] || \
+   [ ! -f "$STUDY_ROOT/candidates/arm_top1_onrkl.npz" ]; then
+  echo "online candidates missing: running v1 online prep into STUDY_ROOT"
+  PYTHON="$PY" STUDY_ROOT="$STUDY_ROOT" \
+  PAIR=online ARMS="base onfkl onrkl" CAND_ARMS="onfkl onrkl" \
+  STAGES="rollouts_arms candidates index adoption branches utility summary" \
+    bash "$REPO/scripts/colab/run_exploration_study.sh" || exit 1
+fi
+
+export PYTHON="$PY"
+export STUDY_ROOT OUT_ROOT
+export PAIR=online
+export STATE_GROUPS="G1 G2 G3"
+export MAX_STATES=20
+export PER_GROUP=5
+export SAMPLES=8
+export SPAN_TOKENS=3
+export EXTRA_ARMS="base onfkl onrkl"
+export EXTRA_N=4
+export HARD_ARMS="onfkl"
+export HARD_N=8
+export STAGES="eval_extra stage0 panel entries entries_teacher entry_analysis interventions intervention_analysis hard entropy eval_entropy stage0"
+
+bash "$REPO/scripts/colab/run_exploration_v2.sh"
+
+for pair in online; do
+  root="$OUT_ROOT"
+  echo
+  echo "##### $pair · STAGE0"
+  [ -f "$root/stage0_$pair/STAGE0.md" ] && cat "$root/stage0_$pair/STAGE0.md" || echo "(missing)"
+  echo
+  echo "##### $pair · PANEL"
+  [ -f "$root/panel_analysis_$pair/PANEL.md" ] && cat "$root/panel_analysis_$pair/PANEL.md" || echo "(missing)"
+  echo
+  echo "##### $pair · HARD"
+  [ -f "$root/hard_$pair/HARD.md" ] && cat "$root/hard_$pair/HARD.md" || echo "(missing)"
+  echo
+  echo "##### $pair · ENTROPY"
+  [ -f "$root/entropy_match_$pair/entropy_match.json" ] && cat "$root/entropy_match_$pair/entropy_match.json" || echo "(missing)"
+done
+```
+
+## Cell O3 — 用修正后的干预重跑 panel intervention（`_v2`）
 
 ```bash
 %%bash
 set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 PY=/content/verl_env/bin/python
+STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
 OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
 
-run_score () {
-  local dir="$1" pos="$2" neg="$3"
-  local ann="$OUT_ROOT/$dir/blind_annotations.jsonl"
-  [ -f "$ann" ] || { echo "[$dir] skip: $ann missing"; return 0; }
-  "$PY" -I "$REPO/scripts/analysis/score_blind_review.py" \
-    --annotations "$ann" \
-    --key "$OUT_ROOT/$dir/blind_key.json" \
-    --positive-group "$pos" --negative-group "$neg" \
-    --out-dir "$OUT_ROOT/$dir"
-  cat "$OUT_ROOT/$dir/BLIND_REVIEW.md"
-}
+STAGES=intervention_v2 \
+PYTHON="$PY" STUDY_ROOT="$STUDY_ROOT" OUT_ROOT="$OUT_ROOT" \
+  bash "$REPO/scripts/colab/run_recovery_branch_study.sh"
 
-run_score hard_review correct wrong
-run_score branch_review_fkl gain lose
-run_score branch_review_rkl gain lose
+cat "$OUT_ROOT/panel_analysis_fixed/PANEL.md"
+```
+
+## Cell O4 — recovery 的 `--gain-set all` 全量转移版本
+
+```bash
+%%bash
+set -euo pipefail
+REPO=/content/OPSD_OnPolicyDistillation
+PY=/content/verl_env/bin/python
+STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
+mkdir -p "$OUT_ROOT"
+
+"$PY" -I "$REPO/scripts/analysis/collect_recovery_states.py" \
+  --rollouts "fkl=$STUDY_ROOT/rollouts/fixedfkl" \
+             "rkl=$STUDY_ROOT/rollouts/fixedrkl" \
+  --teacher-path /content/models/Qwen3-4B-Instruct-2507 \
+  --base-model /content/models/Qwen3-1.7B \
+  --fkl-model /content/drive/MyDrive/outputs/fixedfkl60/train/step_0060 \
+  --rkl-model /content/drive/MyDrive/outputs/fixedrkl60/train/step_0060 \
+  --tokenizer-path /content/models/Qwen3-1.7B \
+  --questions-per-bench 12 12 8 \
+  --position-fracs 0.25 0.5 0.75 \
+  --gain-set all --pool-per-branch 32 \
+  --max-per-question 2 --max-states 80 \
+  --max-new-tokens 16384 --max-model-len 34000 \
+  --seed 20261123 \
+  --out-dir "$OUT_ROOT/recovery_states_allgain"
+
+for arm in fkl rkl; do
+  if [ "$arm" = "fkl" ]; then
+    MODEL=/content/drive/MyDrive/outputs/fixedfkl60/train/step_0060
+  else
+    MODEL=/content/drive/MyDrive/outputs/fixedrkl60/train/step_0060
+  fi
+  "$PY" -I "$REPO/scripts/analysis/run_gain_lose_branches.py" \
+    --states "$OUT_ROOT/recovery_states_allgain/states.jsonl" \
+    --model-path "$MODEL" --tokenizer-path /content/models/Qwen3-1.7B \
+    --tag "$arm" --out-dir "$OUT_ROOT/recovery_runs_allgain/$arm" \
+    --samples-per-branch 8 --max-new-tokens 16384 --max-model-len 34000 --seed 0
+done
+
+"$PY" -I "$REPO/scripts/analysis/analyze_gain_lose.py" \
+  --states "$OUT_ROOT/recovery_states_allgain/states.jsonl" \
+  --examined "$OUT_ROOT/recovery_states_allgain/examined.jsonl" \
+  --runs "fkl=$OUT_ROOT/recovery_runs_allgain/fkl/gain_lose_fkl.jsonl" \
+         "rkl=$OUT_ROOT/recovery_runs_allgain/rkl/gain_lose_rkl.jsonl" \
+  --out-dir "$OUT_ROOT/recovery_analysis_allgain"
+cat "$OUT_ROOT/recovery_analysis_allgain/GAIN_LOSE.md"
+
+for arm in fkl rkl; do
+  "$PY" -I "$REPO/scripts/analysis/export_blind_review.py" --mode branches \
+    --samples "$OUT_ROOT/recovery_runs_allgain/$arm/gain_lose_$arm.jsonl" \
+    --data-dir /content/data/grpo_processed \
+    --n-per-group 4 --max-questions 8 --seed 0 \
+    --out-dir "$OUT_ROOT/branch_review_allgain_$arm"
+done
+```
+
+---
+
+# 本地（不是 Colab）：盲评汇总
+
+把 `hard_review/`、`branch_review_*/` 从 Drive 下载到当前目录，填好各自的
+`blind_annotations.jsonl`，然后运行：
+
+```bash
+python -I scripts/analysis/score_blind_review.py \
+  --annotations hard_review/blind_annotations.jsonl \
+  --key hard_review/blind_key.json \
+  --positive-group correct --negative-group wrong \
+  --out-dir hard_review
+
+for arm in fkl rkl; do
+  python -I scripts/analysis/score_blind_review.py \
+    --annotations branch_review_$arm/blind_annotations.jsonl \
+    --key branch_review_$arm/blind_key.json \
+    --positive-group gain --negative-group lose \
+    --out-dir branch_review_$arm
+done
+
+for arm in fkl rkl; do
+  [ -d branch_review_allgain_$arm ] || continue
+  python -I scripts/analysis/score_blind_review.py \
+    --annotations branch_review_allgain_$arm/blind_annotations.jsonl \
+    --key branch_review_allgain_$arm/blind_key.json \
+    --positive-group gain --negative-group lose \
+    --out-dir branch_review_allgain_$arm
+done
 ```
