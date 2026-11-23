@@ -100,6 +100,8 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 ## Cell 1 — 一个 cell 跑完所有实验
 
 - 先 fixed；如果 `candidates/arm_top1_onfkl.npz` 和 `onrkl.npz` 存在，再自动跑 online。
+- **输出目录**：v1 输入仍从 `STUDY_ROOT` 读；本次所有 v2 产物写到 Drive 上的新目录
+  `OUT_ROOT`（默认 `exploration_20261122_v2`），**不会改动旧的 `exploration_20261122`**。
 - 前台执行；中断后重跑同一个 cell 会按文件续跑（panel 复用、entries/interventions 按 state/entry/condition 续、eval_extra 看 `all_summary.json`、hard 按题续）。
 - 默认 **pilot 规模**：`MAX_STATES=20 PER_GROUP=5`、`SPAN_TOKENS=3`、`EXTRA_N=4`。
   全量把 `MAX_STATES/PER_GROUP` 改成 `40/10`；pass@16 把 `EXTRA_N` 改成 `12`（很贵）。
@@ -109,15 +111,19 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 %%bash
 set -uo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
+# v1 inputs (rollouts/candidates/counterfactual) stay here:
 STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+# new Drive folder for this v2 run's outputs; change the suffix per run if needed:
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
 PY=/content/verl_env/bin/python
+mkdir -p "$OUT_ROOT"
 
 git -C "$REPO" pull --ff-only
 git -C "$REPO" log --oneline -1
 
 run_pair () {
   local pair="$1" extra_arms="$2" hard_arm="$3"
-  export STUDY_ROOT PAIR="$pair"
+  export STUDY_ROOT OUT_ROOT PAIR="$pair"
   export STATE_GROUPS="G1 G2 G3"
   export MAX_STATES=20          # 全量 40
   export PER_GROUP=5            # 全量 10
@@ -157,7 +163,7 @@ echo "============================================================"
 echo " reports"
 echo "============================================================"
 for pair in fixed online; do
-  root="$STUDY_ROOT"
+  root="$OUT_ROOT"
   echo
   echo "##### $pair · STAGE0"
   [ -f "$root/stage0_$pair/STAGE0.md" ] && cat "$root/stage0_$pair/STAGE0.md" || echo "(missing)"
@@ -175,8 +181,8 @@ done
 echo
 echo "##### judge files"
 judge_dirs=()
-for d in "$STUDY_ROOT/panel_runs" "$STUDY_ROOT/stage0_fixed" "$STUDY_ROOT/stage0_online" \
-         "$STUDY_ROOT/hard_fixed" "$STUDY_ROOT/hard_online"; do
+for d in "$OUT_ROOT/panel_runs" "$OUT_ROOT/stage0_fixed" "$OUT_ROOT/stage0_online" \
+         "$OUT_ROOT/hard_fixed" "$OUT_ROOT/hard_online"; do
   [ -d "$d" ] && judge_dirs+=("$d")
 done
 if [ ${#judge_dirs[@]} -gt 0 ]; then
@@ -189,13 +195,18 @@ fi
 
 ## 输出在哪
 
+本次 v2 产物都在 Drive 新目录 `OUT_ROOT`（默认
+`/content/drive/MyDrive/outputs/exploration_20261122_v2`）；v1 输入仍从
+`STUDY_ROOT`（旧的 `exploration_20261122`）读。旧的 study 目录不会被改动。
+`outputs/eval_extra/` 和 `outputs/eval/<arm>60` 仍是共享的评测缓存（会复用）。
+
 - `stage0_<pair>/STAGE0.md`：题目聚类 `U_force/U_supp`、连续 Δp、pass@1/4/8/16、累计 token 预算、hard questions。
 - `panel_analysis_<pair>/PANEL.md`：
   - entry 表：`r` / `p` / `control` / `rkl` 相对 natural 的 U（μ=FKL/RKL/teacher）；
   - intervention 表：FKL 撤回、RKL 注入、sham。
 - `hard_<pair>/HARD.md`：Base+RKL 都失败的题上，FKL 新样本的 pass@k。
-- `entropy_match_<pair>/entropy_match.json`：`T_match`；`eval/entropy_rkl_<pair>/` 是 T* 的 RKL eval。
-- `eval_extra/<arm>_seed1234/`：额外 32k 样本。
+- `entropy_match_<pair>/entropy_match.json`：`T_match`；`OUT_ROOT/eval/entropy_rkl_<pair>/` 是 T* 的 RKL eval。
+- `outputs/eval_extra/<arm>_seed1234/`：额外 32k 样本（共享评测缓存，会复用）。
 - `panel_runs/<pair>/*/judge/`、`stage0_<pair>/judge/`、`hard_<pair>/judge/`：留给后续 LLM/PRM judge。
 
 ## 重点看
@@ -252,10 +263,12 @@ set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 PY=/content/verl_env/bin/python
 STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
 
 [ -d /content/drive/MyDrive ] || { echo "Drive 未挂载：先跑 Part 0 Cell 0a"; exit 1; }
 [ -d "$REPO/.git" ] || { echo "缺 repo：先跑 Part 0 Cell 0b"; exit 1; }
 [ -x "$PY" ] || { echo "缺 $PY：先跑 Part 0 Cell 0b"; exit 1; }
+mkdir -p "$OUT_ROOT"
 
 git -C "$REPO" pull --ff-only
 git -C "$REPO" log --oneline -1
@@ -264,8 +277,8 @@ for f in \
   /content/models/Qwen3-1.7B/config.json \
   /content/models/Qwen3-4B-Instruct-2507/config.json \
   /content/data/grpo_processed/val_aime24.parquet \
-  "$STUDY_ROOT/panel_fixed/states.jsonl" \
-  "$STUDY_ROOT/panel_fixed/distributions.npz" \
+  "$OUT_ROOT/panel_fixed/states.jsonl" \
+  "$OUT_ROOT/panel_fixed/distributions.npz" \
   "$STUDY_ROOT/rollouts/fixedfkl" \
   "$STUDY_ROOT/rollouts/fixedrkl" \
   "$REPO/scripts/analysis/validate_interventions.py" \
@@ -274,7 +287,7 @@ for f in \
   "$REPO/scripts/analysis/analyze_gain_lose.py" \
   /content/drive/MyDrive/outputs/fixedfkl60/train/step_0060/config.json \
   /content/drive/MyDrive/outputs/fixedrkl60/train/step_0060/config.json; do
-  [ -e "$f" ] || { echo "MISSING $f — 先跑 Part 0 setup 或 commit/push 新脚本后 git pull"; exit 1; }
+  [ -e "$f" ] || { echo "MISSING $f — 先跑 Part 0 setup、Part 1 到 OUT_ROOT，或 commit/push 新脚本后 git pull"; exit 1; }
 done
 
 "$PY" -c "import numpy, torch, transformers, vllm; print('env OK')"
@@ -288,14 +301,15 @@ set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 PY=/content/verl_env/bin/python
 STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
 
 "$PY" -I "$REPO/scripts/analysis/validate_interventions.py" \
-  --states "$STUDY_ROOT/panel_fixed/states.jsonl" \
-  --distributions "$STUDY_ROOT/panel_fixed/distributions.npz" \
+  --states "$OUT_ROOT/panel_fixed/states.jsonl" \
+  --distributions "$OUT_ROOT/panel_fixed/distributions.npz" \
   --tokenizer-path /content/models/Qwen3-1.7B \
-  --out-dir "$STUDY_ROOT/intervention_check" --strict
+  --out-dir "$OUT_ROOT/intervention_check" --strict
 
-cat "$STUDY_ROOT/intervention_check/INTERVENTION_CHECK.md"
+cat "$OUT_ROOT/intervention_check/INTERVENTION_CHECK.md"
 ```
 
 应看到：
@@ -321,6 +335,7 @@ set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 PY=/content/verl_env/bin/python
 STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
 
 # 2a) 收集自然前缀 + 恢复集合 + gain/lose token 池（约 10–30 分钟）
 "$PY" -I "$REPO/scripts/analysis/collect_recovery_states.py" \
@@ -335,25 +350,25 @@ STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
   --position-fracs 0.25 0.5 0.75 \
   --pool-per-branch 32 --max-per-question 2 --max-states 80 \
   --max-new-tokens 16384 --max-model-len 34000 \
-  --seed 20261123 --out-dir "$STUDY_ROOT/recovery_states"
+  --seed 20261123 --out-dir "$OUT_ROOT/recovery_states"
 
 # 想先检查“固定选点规则”而不加载模型：把 2a 加上 --dry-run、
-# --out-dir 换成 $STUDY_ROOT/recovery_plan，查看 planned.jsonl 与
+# --out-dir 换成 $OUT_ROOT/recovery_plan，查看 planned.jsonl 与
 # selected_questions.json 即可。
 
 # 2b) 同一前缀、同一入口：先 Fixed FKL 续写，再 Fixed RKL（各 8 次）
 "$PY" -I "$REPO/scripts/analysis/run_gain_lose_branches.py" \
-  --states "$STUDY_ROOT/recovery_states/states.jsonl" \
+  --states "$OUT_ROOT/recovery_states/states.jsonl" \
   --model-path /content/drive/MyDrive/outputs/fixedfkl60/train/step_0060 \
   --tokenizer-path /content/models/Qwen3-1.7B --tag fkl \
-  --out-dir "$STUDY_ROOT/recovery_runs/fkl" \
+  --out-dir "$OUT_ROOT/recovery_runs/fkl" \
   --samples-per-branch 8 --max-new-tokens 16384 --max-model-len 34000 --seed 0
 
 "$PY" -I "$REPO/scripts/analysis/run_gain_lose_branches.py" \
-  --states "$STUDY_ROOT/recovery_states/states.jsonl" \
+  --states "$OUT_ROOT/recovery_states/states.jsonl" \
   --model-path /content/drive/MyDrive/outputs/fixedrkl60/train/step_0060 \
   --tokenizer-path /content/models/Qwen3-1.7B --tag rkl \
-  --out-dir "$STUDY_ROOT/recovery_runs/rkl" \
+  --out-dir "$OUT_ROOT/recovery_runs/rkl" \
   --samples-per-branch 8 --max-new-tokens 16384 --max-model-len 34000 --seed 0
 ```
 
@@ -377,15 +392,16 @@ set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 PY=/content/verl_env/bin/python
 STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
 
 "$PY" -I "$REPO/scripts/analysis/analyze_gain_lose.py" \
-  --states "$STUDY_ROOT/recovery_states/states.jsonl" \
-  --examined "$STUDY_ROOT/recovery_states/examined.jsonl" \
-  --runs "fkl=$STUDY_ROOT/recovery_runs/fkl/gain_lose_fkl.jsonl" \
-         "rkl=$STUDY_ROOT/recovery_runs/rkl/gain_lose_rkl.jsonl" \
-  --out-dir "$STUDY_ROOT/recovery_analysis"
+  --states "$OUT_ROOT/recovery_states/states.jsonl" \
+  --examined "$OUT_ROOT/recovery_states/examined.jsonl" \
+  --runs "fkl=$OUT_ROOT/recovery_runs/fkl/gain_lose_fkl.jsonl" \
+         "rkl=$OUT_ROOT/recovery_runs/rkl/gain_lose_rkl.jsonl" \
+  --out-dir "$OUT_ROOT/recovery_analysis"
 
-cat "$STUDY_ROOT/recovery_analysis/GAIN_LOSE.md"
+cat "$OUT_ROOT/recovery_analysis/GAIN_LOSE.md"
 ```
 
 报告两组数：
@@ -416,7 +432,8 @@ cat "$STUDY_ROOT/recovery_analysis/GAIN_LOSE.md"
 hard 模式用于先校准判定尺度；gain/lose 模式是主实验。两者都不把最终答案
 正确性告诉评审者。
 
-**4a) 先用现有 hard 复测校准尺度**（10 条正确输出 + 同题失败）：
+**4a) 先用 Part 1 hard stage 的复测校准尺度**（10 条正确输出 + 同题失败；
+样本在 `OUT_ROOT/hard_samples/`，由 Part 1 的 `hard` stage 生成）：
 
 ```bash
 %%bash
@@ -424,15 +441,16 @@ set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 PY=/content/verl_env/bin/python
 STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
 
 "$PY" -I "$REPO/scripts/analysis/export_blind_review.py" \
   --mode hard \
-  --samples "$STUDY_ROOT/hard_samples/fixedfkl_seed999.jsonl" \
+  --samples "$OUT_ROOT/hard_samples/fixedfkl_seed999.jsonl" \
   --data-dir /content/data/grpo_processed \
   --n-correct 10 --n-wrong 1 --seed 0 \
-  --out-dir "$STUDY_ROOT/hard_review"
+  --out-dir "$OUT_ROOT/hard_review"
 
-cat "$STUDY_ROOT/hard_review/ANNOTATION_GUIDE.md"
+cat "$OUT_ROOT/hard_review/ANNOTATION_GUIDE.md"
 ```
 
 **4b) 分支盲评（主实验）**：对 gain/lose 两组的输出抽样，题内配对：
@@ -443,13 +461,14 @@ set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 PY=/content/verl_env/bin/python
 STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
 
 "$PY" -I "$REPO/scripts/analysis/export_blind_review.py" \
   --mode branches \
-  --samples "$STUDY_ROOT/recovery_runs/fkl/gain_lose_fkl.jsonl" \
+  --samples "$OUT_ROOT/recovery_runs/fkl/gain_lose_fkl.jsonl" \
   --data-dir /content/data/grpo_processed \
   --n-per-group 4 --max-questions 8 --seed 0 \
-  --out-dir "$STUDY_ROOT/branch_review_fkl"
+  --out-dir "$OUT_ROOT/branch_review_fkl"
 ```
 
 按 guide 填 `blind_annotations_template.jsonl`，然后汇总（按题配对 CI；
@@ -461,12 +480,13 @@ set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 PY=/content/verl_env/bin/python
 STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
 
 "$PY" -I "$REPO/scripts/analysis/score_blind_review.py" \
-  --annotations "$STUDY_ROOT/branch_review_fkl/blind_annotations.jsonl" \
-  --key "$STUDY_ROOT/branch_review_fkl/blind_key.json" \
+  --annotations "$OUT_ROOT/branch_review_fkl/blind_annotations.jsonl" \
+  --key "$OUT_ROOT/branch_review_fkl/blind_key.json" \
   --positive-group gain --negative-group lose \
-  --out-dir "$STUDY_ROOT/branch_review_fkl"
+  --out-dir "$OUT_ROOT/branch_review_fkl"
 ```
 
 RKL 续写用同样的命令，只把 `recovery_runs/fkl/` 换成 `recovery_runs/rkl/`、
@@ -484,9 +504,10 @@ set -euo pipefail
 REPO=/content/OPSD_OnPolicyDistillation
 PY=/content/verl_env/bin/python
 STUDY_ROOT=/content/drive/MyDrive/outputs/exploration_20261122
+OUT_ROOT=/content/drive/MyDrive/outputs/exploration_20261122_v2
 
 STAGES=intervention_v2 \
-PYTHON="$PY" STUDY_ROOT="$STUDY_ROOT" \
+PYTHON="$PY" STUDY_ROOT="$STUDY_ROOT" OUT_ROOT="$OUT_ROOT" \
   bash "$REPO/scripts/colab/run_recovery_branch_study.sh"
 ```
 
@@ -520,8 +541,12 @@ PYTHON="$PY" STUDY_ROOT="$STUDY_ROOT" \
 
 ## 输出位置
 
+以下都在 `OUT_ROOT`（默认 `/content/drive/MyDrive/outputs/exploration_20261122_v2`）下，
+不会改动旧的 `exploration_20261122`：
+
 - `intervention_check/INTERVENTION_CHECK.md`
 - `recovery_states/{states.jsonl,examined.jsonl,selected_questions.json,manifest.json}`
 - `recovery_runs/{fkl,rkl}/gain_lose_*.jsonl` + `judge/`
 - `recovery_analysis/GAIN_LOSE.md`
 - `hard_review/{blind_cases.jsonl,blind_key.json,ANNOTATION_GUIDE.md}`
+- `branch_review_{fkl,rkl}/`（gain/lose 盲评）

@@ -31,6 +31,9 @@ MODEL_ROOT=${MODEL_ROOT:-/content/models}
 DATA_PROCESSED=${DATA_PROCESSED:-/content/data/grpo_processed}
 OUTPUT_ROOT=${OUTPUT_ROOT:-/content/drive/MyDrive/outputs}
 STUDY_ROOT=${STUDY_ROOT:-$OUTPUT_ROOT/exploration_20261122}
+# v1 inputs (rollouts/candidates/counterfactual) stay in STUDY_ROOT.
+# v2 study outputs go to OUT_ROOT; default keeps the old layout.
+OUT_ROOT=${OUT_ROOT:-$STUDY_ROOT}
 BASE_MODEL=${BASE_MODEL:-$MODEL_ROOT/Qwen3-1.7B}
 TOKENIZER_PATH=${TOKENIZER_PATH:-$BASE_MODEL}
 TEACHER_MODEL_PATH=${TEACHER_MODEL_PATH:-$MODEL_ROOT/Qwen3-4B-Instruct-2507}
@@ -83,16 +86,22 @@ ckpt_for() {
 CAND_DIR="$STUDY_ROOT/candidates"
 ROLLOUT_DIR="$STUDY_ROOT/rollouts"
 INDEX_DIR="$STUDY_ROOT/index"
-PANEL_DIR="$STUDY_ROOT/panel_${PAIR}"
-PANEL_RUNS="$STUDY_ROOT/panel_runs/${PAIR}"
-ANALYSIS_DIR="$STUDY_ROOT/panel_analysis_${PAIR}"
-STAGE0_DIR="$STUDY_ROOT/stage0_${PAIR}"
-ENTROPY_DIR="$STUDY_ROOT/entropy_match_${PAIR}"
-HARD_DIR="$STUDY_ROOT/hard_${PAIR}"
-HARD_SAMPLE_DIR="$STUDY_ROOT/hard_samples"
-LOG_DIR="$STUDY_ROOT/logs_v2"
+PANEL_DIR="$OUT_ROOT/panel_${PAIR}"
+PANEL_RUNS="$OUT_ROOT/panel_runs/${PAIR}"
+ANALYSIS_DIR="$OUT_ROOT/panel_analysis_${PAIR}"
+STAGE0_DIR="$OUT_ROOT/stage0_${PAIR}"
+ENTROPY_DIR="$OUT_ROOT/entropy_match_${PAIR}"
+HARD_DIR="$OUT_ROOT/hard_${PAIR}"
+HARD_SAMPLE_DIR="$OUT_ROOT/hard_samples"
+LOG_DIR="$OUT_ROOT/logs_v2"
+if [ "$OUT_ROOT" = "$STUDY_ROOT" ]; then
+  # backward compatible: entropy eval lives in the shared eval cache
+  ENTROPY_EVAL_DIR=${ENTROPY_EVAL_DIR:-$OUTPUT_ROOT/eval/entropy_rkl_${PAIR}}
+else
+  ENTROPY_EVAL_DIR=${ENTROPY_EVAL_DIR:-$OUT_ROOT/eval/entropy_rkl_${PAIR}}
+fi
 mkdir -p "$PANEL_DIR" "$PANEL_RUNS" "$ANALYSIS_DIR" "$STAGE0_DIR" "$ENTROPY_DIR" \
-         "$HARD_DIR" "$HARD_SAMPLE_DIR" "$LOG_DIR"
+         "$HARD_DIR" "$HARD_SAMPLE_DIR" "$LOG_DIR" "$ENTROPY_EVAL_DIR"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -102,7 +111,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 [ -d "$ROLLOUT_DIR/base_ref" ] || die "missing $ROLLOUT_DIR/base_ref"
 
 say "============================================================"
-say " v2 study: $STUDY_ROOT"
+say " v1 inputs: $STUDY_ROOT | v2 outputs: $OUT_ROOT"
 say " pair=$PAIR fkl=$FKL_ARM rkl=$RKL_ARM"
 say " stages: $STAGES"
 say " panel: groups='$STATE_GROUPS' max_states=$MAX_STATES per_group=$PER_GROUP"
@@ -141,7 +150,7 @@ stage0() {
     [ -d "$extra" ] && dirs="${dirs:+$dirs,}$extra"
     [ -n "$dirs" ] && evals+=("$e=$dirs")
   done
-  d="$OUTPUT_ROOT/eval/entropy_rkl_${PAIR}"
+  d="$ENTROPY_EVAL_DIR"
   [ -d "$d" ] && evals+=("entropy_rkl=$d")
   run_logged stage0 "$PY" -I "$REPO/scripts/analysis/analyze_stage0.py" \
     --selection "$sel" --branches "${specs[@]}" \
@@ -329,7 +338,7 @@ stage_eval_entropy() {
   [ -f "$match" ] || die "missing $match (run entropy)"
   local t
   t=$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1]))['T_match'])" "$match")
-  local out="$OUTPUT_ROOT/eval/entropy_rkl_${PAIR}"
+  local out="$ENTROPY_EVAL_DIR"
   say "[eval_entropy] T*=$t out=$out"
   run_logged eval_entropy "$PY" -I "$REPO/scripts/eval/eval_ckpt_bench.py" \
     --model-path "$RKL_CKPT" --tokenizer-path "$TOKENIZER_PATH" \

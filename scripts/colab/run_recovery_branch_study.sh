@@ -18,7 +18,9 @@ REPO="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PY=${PYTHON:-${VENV_DIR:-/content/verl_env}/bin/python}
 
 STUDY_ROOT=${STUDY_ROOT:-/content/drive/MyDrive/outputs/exploration_20261122}
-PANEL_DIR=${PANEL_DIR:-$STUDY_ROOT/panel_fixed}
+# v1 inputs stay in STUDY_ROOT; recovery outputs go to OUT_ROOT (new Drive folder)
+OUT_ROOT=${OUT_ROOT:-/content/drive/MyDrive/outputs/exploration_20261122_v2}
+PANEL_DIR=${PANEL_DIR:-$OUT_ROOT/panel_fixed}
 BASE_MODEL=${BASE_MODEL:-/content/models/Qwen3-1.7B}
 TEACHER_MODEL=${TEACHER_MODEL:-/content/models/Qwen3-4B-Instruct-2507}
 FKL_CKPT=${FKL_CKPT:-/content/drive/MyDrive/outputs/fixedfkl60/train/step_0060}
@@ -26,8 +28,8 @@ RKL_CKPT=${RKL_CKPT:-/content/drive/MyDrive/outputs/fixedrkl60/train/step_0060}
 ROLLOUT_FKL=${ROLLOUT_FKL:-$STUDY_ROOT/rollouts/fixedfkl}
 ROLLOUT_RKL=${ROLLOUT_RKL:-$STUDY_ROOT/rollouts/fixedrkl}
 DATA_PROCESSED=${DATA_PROCESSED:-/content/data/grpo_processed}
-LOG_DIR=${LOG_DIR:-$STUDY_ROOT/logs_recovery}
-mkdir -p "$LOG_DIR"
+LOG_DIR=${LOG_DIR:-$OUT_ROOT/logs_recovery}
+mkdir -p "$OUT_ROOT" "$LOG_DIR"
 
 STAGES=${STAGES:-"check collect branches analyze"}
 SEED=${SEED:-20261123}
@@ -61,7 +63,7 @@ stage_check() {
     --states "$PANEL_DIR/states.jsonl" \
     --distributions "$PANEL_DIR/distributions.npz" \
     --tokenizer-path "$BASE_MODEL" \
-    --out-dir "$STUDY_ROOT/intervention_check" --strict
+    --out-dir "$OUT_ROOT/intervention_check" --strict
 }
 
 stage_collect() {
@@ -74,7 +76,7 @@ stage_collect() {
     --pool-per-branch "$POOL" --max-per-question "$MAX_PER_Q" \
     --max-states "$MAX_STATES" --max-new-tokens "$MAX_NEW" \
     --max-model-len "$MAX_LEN" --seed "$SEED" \
-    --out-dir "$STUDY_ROOT/recovery_states"
+    --out-dir "$OUT_ROOT/recovery_states"
 }
 
 stage_branches() {
@@ -82,9 +84,9 @@ stage_branches() {
   for arm in fkl rkl; do
     if [ "$arm" = "fkl" ]; then model=$FKL_CKPT; else model=$RKL_CKPT; fi
     run_logged "branches_$arm" "$PY" -I "$REPO/scripts/analysis/run_gain_lose_branches.py" \
-      --states "$STUDY_ROOT/recovery_states/states.jsonl" \
+      --states "$OUT_ROOT/recovery_states/states.jsonl" \
       --model-path "$model" --tokenizer-path "$BASE_MODEL" \
-      --tag "$arm" --out-dir "$STUDY_ROOT/recovery_runs/$arm" \
+      --tag "$arm" --out-dir "$OUT_ROOT/recovery_runs/$arm" \
       --samples-per-branch "$SAMPLES" \
       --max-new-tokens "$MAX_NEW" --max-model-len "$MAX_LEN" \
       --gpu-memory-utilization "$GPU_UTIL" --seed 0 || exit 1
@@ -93,28 +95,28 @@ stage_branches() {
 
 stage_analyze() {
   run_logged analyze "$PY" -I "$REPO/scripts/analysis/analyze_gain_lose.py" \
-    --states "$STUDY_ROOT/recovery_states/states.jsonl" \
-    --examined "$STUDY_ROOT/recovery_states/examined.jsonl" \
-    --runs "fkl=$STUDY_ROOT/recovery_runs/fkl/gain_lose_fkl.jsonl" \
-           "rkl=$STUDY_ROOT/recovery_runs/rkl/gain_lose_rkl.jsonl" \
-    --out-dir "$STUDY_ROOT/recovery_analysis"
+    --states "$OUT_ROOT/recovery_states/states.jsonl" \
+    --examined "$OUT_ROOT/recovery_states/examined.jsonl" \
+    --runs "fkl=$OUT_ROOT/recovery_runs/fkl/gain_lose_fkl.jsonl" \
+           "rkl=$OUT_ROOT/recovery_runs/rkl/gain_lose_rkl.jsonl" \
+    --out-dir "$OUT_ROOT/recovery_analysis"
 }
 
 stage_blind() {
   run_logged blind_hard "$PY" -I "$REPO/scripts/analysis/export_blind_review.py" \
     --mode hard \
-    --samples "$STUDY_ROOT/hard_samples/fixedfkl_seed999.jsonl" \
+    --samples "$OUT_ROOT/hard_samples/fixedfkl_seed999.jsonl" \
     --data-dir "$DATA_PROCESSED" \
     --n-correct 10 --n-wrong 1 --seed 0 \
-    --out-dir "$STUDY_ROOT/hard_review"
+    --out-dir "$OUT_ROOT/hard_review"
   local arm f
   for arm in fkl rkl; do
-    f="$STUDY_ROOT/recovery_runs/$arm/gain_lose_$arm.jsonl"
+    f="$OUT_ROOT/recovery_runs/$arm/gain_lose_$arm.jsonl"
     [ -f "$f" ] || { say "[blind] skip $arm: missing $f"; continue; }
     run_logged "blind_$arm" "$PY" -I "$REPO/scripts/analysis/export_blind_review.py" \
       --mode branches --samples "$f" --data-dir "$DATA_PROCESSED" \
       --n-per-group 4 --max-questions 8 --seed 0 \
-      --out-dir "$STUDY_ROOT/branch_review_$arm" || exit 1
+      --out-dir "$OUT_ROOT/branch_review_$arm" || exit 1
   done
 }
 
@@ -123,7 +125,7 @@ stage_intervention_v2() {
   for arm in fixedfkl fixedrkl; do
     if [ "$arm" = "fixedfkl" ]; then role=fkl; model=$FKL_CKPT;
     else role=rkl; model=$RKL_CKPT; fi
-    out="$STUDY_ROOT/panel_runs/fixed/intervention_${arm}_v2"
+    out="$OUT_ROOT/panel_runs/fixed/intervention_${arm}_v2"
     run_logged "intervention_${arm}_v2" "$PY" -I "$REPO/scripts/analysis/run_panel_branches.py" \
       --mode intervention --states "$PANEL_DIR/states.jsonl" \
       --reference "$STUDY_ROOT/rollouts/base_ref" \
@@ -134,12 +136,12 @@ stage_intervention_v2() {
   done
   run_logged intervention_analysis_v2 "$PY" -I "$REPO/scripts/analysis/analyze_panel.py" \
     --states "$PANEL_DIR/states.jsonl" \
-    --entry "fixedfkl=$STUDY_ROOT/panel_runs/fixed/entry_fixedfkl/entry_fixedfkl.jsonl" \
-            "fixedrkl=$STUDY_ROOT/panel_runs/fixed/entry_fixedrkl/entry_fixedrkl.jsonl" \
-            "teacher=$STUDY_ROOT/panel_runs/fixed/entry_teacher/entry_teacher.jsonl" \
-    --intervention "fkl=$STUDY_ROOT/panel_runs/fixed/intervention_fixedfkl_v2/intervention_fixedfkl.jsonl" \
-                   "rkl=$STUDY_ROOT/panel_runs/fixed/intervention_fixedrkl_v2/intervention_fixedrkl.jsonl" \
-    --out-dir "$STUDY_ROOT/panel_analysis_fixed"
+    --entry "fixedfkl=$OUT_ROOT/panel_runs/fixed/entry_fixedfkl/entry_fixedfkl.jsonl" \
+            "fixedrkl=$OUT_ROOT/panel_runs/fixed/entry_fixedrkl/entry_fixedrkl.jsonl" \
+            "teacher=$OUT_ROOT/panel_runs/fixed/entry_teacher/entry_teacher.jsonl" \
+    --intervention "fkl=$OUT_ROOT/panel_runs/fixed/intervention_fixedfkl_v2/intervention_fixedfkl.jsonl" \
+                   "rkl=$OUT_ROOT/panel_runs/fixed/intervention_fixedrkl_v2/intervention_fixedrkl.jsonl" \
+    --out-dir "$OUT_ROOT/panel_analysis_fixed"
 }
 
 for stage in $STAGES; do
@@ -156,7 +158,7 @@ done
 
 say ""
 say "done."
-say "  intervention check : $STUDY_ROOT/intervention_check/INTERVENTION_CHECK.md"
-say "  recovery states    : $STUDY_ROOT/recovery_states/"
-say "  branch runs        : $STUDY_ROOT/recovery_runs/{fkl,rkl}/"
-say "  analysis           : $STUDY_ROOT/recovery_analysis/GAIN_LOSE.md"
+say "  intervention check : $OUT_ROOT/intervention_check/INTERVENTION_CHECK.md"
+say "  recovery states    : $OUT_ROOT/recovery_states/"
+say "  branch runs        : $OUT_ROOT/recovery_runs/{fkl,rkl}/"
+say "  analysis           : $OUT_ROOT/recovery_analysis/GAIN_LOSE.md"
