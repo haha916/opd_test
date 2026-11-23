@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Export blind cases for the "effective path" review.
 
-Two modes:
+Three modes:
 
   hard (calibration)
     Take the correct hard-set outputs and matched wrong siblings from the same
@@ -12,6 +12,11 @@ Two modes:
     Sample rows from the gain and lose branch runs on the same question and
     blind both groups.  The reviewer never sees the branch, the model, or the
     final-answer correctness.
+
+  v1 (counterfactual branches)
+    Sample natural / forced / suppressed rows from the v1
+    ``branches_fixedfkl.jsonl``; score forced vs natural and suppressed vs
+    natural with the same three labels.
 
 The reviewer answers three binary questions about the first complete
 mathematical step:
@@ -40,7 +45,7 @@ import exploration_common as C  # noqa: E402
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--mode", choices=["hard", "branches"], default="hard")
+    p.add_argument("--mode", choices=["hard", "branches", "v1"], default="hard")
     p.add_argument("--samples", required=True,
                    help="hard samples jsonl, or one branch-run jsonl")
     p.add_argument("--data-dir", default="",
@@ -122,6 +127,30 @@ def branch_cases(rows, args, rng):
     return cases
 
 
+def v1_cases(rows, args, rng):
+    """v1 counterfactual branches: natural / forced / suppressed."""
+    by_q = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        br = r.get("branch")
+        if br not in ("natural", "forced", "suppressed"):
+            continue
+        by_q[(r["bench"], int(r["index"]))][br].append(r)
+    qs = [q for q, d in by_q.items()
+          if all(d.get(b) for b in ("natural", "forced", "suppressed"))]
+    qs.sort()
+    if len(qs) > args.max_questions:
+        idx = np.sort(rng.permutation(len(qs))[:args.max_questions])
+        qs = [qs[int(i)] for i in idx]
+    cases = []
+    for q in qs:
+        for br in ("natural", "forced", "suppressed"):
+            pool = by_q[q][br]
+            idx = np.sort(rng.permutation(len(pool))[:min(args.n_per_group, len(pool))])
+            for i in idx:
+                cases.append((br, pool[int(i)]))
+    return cases
+
+
 def main():
     args = parse_args()
     out_dir = Path(args.out_dir)
@@ -134,9 +163,12 @@ def main():
     if args.mode == "hard":
         cases = hard_cases(rows, args, rng)
         source = "hard_set"
-    else:
+    elif args.mode == "branches":
         cases = branch_cases(rows, args, rng)
         source = str(Path(args.samples).name)
+    else:
+        cases = v1_cases(rows, args, rng)
+        source = "v1_counterfactual"
     if not cases:
         raise SystemExit("no review cases selected")
 
@@ -158,7 +190,9 @@ def main():
             "group": group,
             "correct": int(r.get("correct", 0)),
             "branch": r.get("branch"),
+            "v1_group": r.get("group"),
             "state_id": r.get("state_id"),
+            "pos": r.get("pos"),
             "token": r.get("token"),
             "token_delta": r.get("token_delta"),
             "tokens": int(r.get("tokens", 0)),
@@ -201,8 +235,10 @@ Fill `blind_annotations_template.jsonl` and keep `case_id` unchanged.  Do not
 consult the model name, the branch, or the final-answer correctness while
 annotating.
 
-After annotation, join with the key (use `--positive-group` /
-`--negative-group` matching the two groups in the key):
+After annotation, join with the key.  Use `--positive-group` /
+`--negative-group` matching the hidden groups: hard = `correct`/`wrong`;
+recovery branches = `gain`/`lose`; v1 counterfactual branches = run the
+scorer twice, `forced` vs `natural` and `suppressed` vs `natural`.
 
 ```bash
 python -I scripts/analysis/score_blind_review.py \\
