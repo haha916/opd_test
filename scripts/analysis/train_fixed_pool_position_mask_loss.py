@@ -18,7 +18,6 @@ import argparse
 import gc
 import json
 import math
-import os
 import random
 import time
 from pathlib import Path
@@ -42,7 +41,7 @@ def load_model(path, trainable):
 
     m = AutoModelForCausalLM.from_pretrained(
         path, torch_dtype=torch.bfloat16, device_map={"": 0},
-        attn_implementation=os.environ.get("ATTN_IMPL", "flash_attention_2"),
+        attn_implementation="flash_attention_2",
     )
     if trainable:
         m.train()

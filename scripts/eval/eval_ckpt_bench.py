@@ -54,20 +54,22 @@ def parse_args():
     p.add_argument("--out-dir", required=True)
     p.add_argument("--n", type=int, default=8)
     p.add_argument("--max-tokens", type=int, default=12288)
-    p.add_argument("--temperature", type=float, default=0.6)
-    p.add_argument("--top-p", type=float, default=0.95)
+    # Project defaults changed on 2026-11-18 to match the sampling used by
+    # OPD papers (TIP/GKD/MiniLLM use T=1.0, top_p=1.0).
+    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--top-p", type=float, default=1.0)
     p.add_argument("--top-k", type=int, default=-1)
-    p.add_argument("--max-model-len", type=int, default=16384)
-    p.add_argument("--gpu-memory-utilization", type=float, default=0.9)
-    p.add_argument("--max-num-seqs", type=int, default=128)
-    p.add_argument("--max-num-batched-tokens", type=int, default=16384)
     p.add_argument(
         "--seed",
         type=int,
         default=None,
-        help="optional sampling seed; use a new seed for independent extra "
-             "samples of the same checkpoint",
+        help="optional sampling seed; None keeps vLLM's per-run random seed "
+             "(current protocol). Set it for reproducible re-evaluations.",
     )
+    p.add_argument("--max-model-len", type=int, default=16384)
+    p.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    p.add_argument("--max-num-seqs", type=int, default=128)
+    p.add_argument("--max-num-batched-tokens", type=int, default=16384)
     p.add_argument(
         "--prompt-mode",
         choices=["tokens", "text"],
@@ -84,7 +86,16 @@ def parse_args():
         "--resume",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="reuse existing <bench>_summary.json instead of regenerating",
+        help="reuse existing <bench>_summary.json instead of regenerating; "
+             "reuse only happens when the recorded sampling/prompt config "
+             "matches this invocation",
+    )
+    p.add_argument(
+        "--record-logprobs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="also record each sample's mean log-prob of the generated tokens "
+             "(requires vLLM logprobs; does not affect sampling or scoring)",
     )
     p.add_argument(
         "--enable-thinking",
@@ -125,6 +136,46 @@ def score_text(text, ground_truth, compute_score, boxed_finder):
     except Exception as exc:  # noqa: BLE001 - reward must never kill the eval
         print(f"[warn] scoring failed: {exc}", flush=True)
     return correct, boxed
+
+
+def resume_mismatch(existing, args, bench, tokenizer_path):
+    """Return a human-readable reason when an old summary is not reusable.
+
+    Old summaries only carry a subset of the fields.  We always compare the
+    fields that determine the accuracy number (sampling config, benchmark,
+    model) and only compare the newer prompt/logprob fields when the old
+    summary recorded them, so resumes written before those fields were added
+    stay valid.
+    """
+    expected = {
+        "tag": args.tag,
+        "model_path": args.model_path,
+        "benchmark": bench,
+        "n": args.n,
+        "max_tokens": args.max_tokens,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "top_k": args.top_k,
+        "seed": args.seed,
+        "tokenizer_path": tokenizer_path,
+        "prompt_mode": args.prompt_mode,
+        "enable_thinking": args.enable_thinking,
+        "record_logprobs": args.record_logprobs,
+    }
+    for key, want in expected.items():
+        if key in existing and existing[key] != want:
+            return f"{key}: existing={existing[key]!r} requested={want!r}"
+    # Fields added after some summaries were written: a summary that predates
+    # them cannot satisfy a request that explicitly enables the new behavior.
+    if args.seed is not None and "seed" not in existing:
+        return "seed: existing summary was produced without a fixed seed"
+    if args.record_logprobs and "record_logprobs" not in existing:
+        return "record_logprobs: existing summary predates per-sample log-prob recording"
+    if args.enable_thinking and "enable_thinking" not in existing:
+        return "enable_thinking: existing summary predates prompt-mode recording"
+    if args.prompt_mode != "tokens" and "prompt_mode" not in existing:
+        return "prompt_mode: existing summary predates prompt-mode recording"
+    return None
 
 
 def main():
@@ -187,7 +238,6 @@ def main():
         max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=args.max_num_batched_tokens,
         disable_log_stats=True,
-        seed=args.seed,
     )
     print(f"[vllm] loaded in {time.time() - t_load:.1f}s", flush=True)
 
@@ -198,8 +248,8 @@ def main():
         top_k=args.top_k,
         max_tokens=args.max_tokens,
         stop_token_ids=[151645, 151643],
-        # 0 = return the sampled token's log-prob (for the logp analysis).
-        logprobs=0,
+        # vLLM only fills cumulative_logprob when logprobs are requested.
+        logprobs=0 if args.record_logprobs else None,
         seed=args.seed,
     )
 
@@ -209,7 +259,8 @@ def main():
         if args.resume and summary_path.exists():
             with open(summary_path) as f:
                 existing = json.load(f)
-            if existing.get("tag") == args.tag and existing.get("model_path") == args.model_path:
+            reason = resume_mismatch(existing, args, bench, tokenizer_path)
+            if reason is None:
                 all_metrics[bench] = existing
                 print(
                     f"[skip] {args.tag} {bench}: reuse existing summary "
@@ -218,7 +269,8 @@ def main():
                 )
                 continue
             print(
-                f"[warn] {args.tag} {bench}: existing summary tag/model mismatch, regenerating",
+                f"[warn] {args.tag} {bench}: existing summary incompatible "
+                f"({reason}), regenerating",
                 flush=True,
             )
         questions, prompts = bench_data[bench]
@@ -233,7 +285,8 @@ def main():
         n_boxed_total = 0
         n_trunc_total = 0
         n_samples_total = 0
-        logp_vals = []
+        logp_sum = 0.0
+        logp_count = 0
 
         for qi, (q, req_out) in enumerate(zip(questions, outputs, strict=True)):
             samples = []
@@ -244,18 +297,12 @@ def main():
                 )
                 ntok = len(out.token_ids)
                 truncated = out.finish_reason == "length"
-                mean_logp = None
-                if out.logprobs:
-                    lp_vals = []
-                    for tid, step_lp in zip(out.token_ids, out.logprobs):
-                        if not step_lp:
-                            continue
-                        if tid in step_lp:
-                            lp_vals.append(step_lp[tid].logprob)
-                        else:
-                            lp_vals.append(next(iter(step_lp.values())).logprob)
-                    if lp_vals:
-                        mean_logp = sum(lp_vals) / len(lp_vals)
+                cumulative_logprob = out.cumulative_logprob
+                mean_logp = (
+                    cumulative_logprob / ntok
+                    if cumulative_logprob is not None and ntok > 0
+                    else None
+                )
                 samples.append(
                     {
                         "index": q["index"],
@@ -265,8 +312,8 @@ def main():
                         "boxed": bool(boxed),
                         "truncated": bool(truncated),
                         "tokens": ntok,
-                        "finish_reason": out.finish_reason,
                         "mean_logp": mean_logp,
+                        "finish_reason": out.finish_reason,
                     }
                 )
                 rows.append(samples[-1])
@@ -276,7 +323,8 @@ def main():
                 n_trunc_total += int(truncated)
                 n_samples_total += 1
                 if mean_logp is not None:
-                    logp_vals.append(mean_logp)
+                    logp_sum += mean_logp
+                    logp_count += 1
             per_question.append(
                 {
                     "index": q["index"],
@@ -300,6 +348,10 @@ def main():
             "top_p": args.top_p,
             "top_k": args.top_k,
             "seed": args.seed,
+            "tokenizer_path": tokenizer_path,
+            "prompt_mode": args.prompt_mode,
+            "enable_thinking": args.enable_thinking,
+            "record_logprobs": args.record_logprobs,
             "num_questions": nq,
             "num_samples": n_samples_total,
             "acc_mean": sum(p["acc"] for p in per_question) / max(1, nq),
@@ -308,8 +360,7 @@ def main():
             "boxed_rate": n_boxed_total / max(1, n_samples_total),
             "trunc_rate": n_trunc_total / max(1, n_samples_total),
             "avg_response_tokens": ntok_total / max(1, n_samples_total),
-            "avg_logp": (sum(logp_vals) / len(logp_vals)) if logp_vals else None,
-            "num_logp_samples": len(logp_vals),
+            "mean_logp": (logp_sum / logp_count) if logp_count else None,
             "gen_seconds": elapsed,
             "tokens_per_second": ntok_total / max(elapsed, 1e-9),
             "per_question": per_question,
@@ -334,7 +385,14 @@ def main():
         "tag": args.tag,
         "model_path": args.model_path,
         "benchmarks": args.benchmarks,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "top_k": args.top_k,
         "seed": args.seed,
+        "tokenizer_path": tokenizer_path,
+        "prompt_mode": args.prompt_mode,
+        "enable_thinking": args.enable_thinking,
+        "record_logprobs": args.record_logprobs,
         "macro_acc_mean": macro_acc,
         "macro_pass_n": macro_pass,
         "per_bench": {
@@ -344,7 +402,7 @@ def main():
                 "boxed_rate": m["boxed_rate"],
                 "trunc_rate": m["trunc_rate"],
                 "avg_response_tokens": m["avg_response_tokens"],
-                "avg_logp": m.get("avg_logp"),
+                "mean_logp": m.get("mean_logp"),
             }
             for b, m in all_metrics.items()
         },
