@@ -34,7 +34,10 @@ SEED=${SEED:-20261124}
 SAMPLES=${SAMPLES:-8}
 NAT_OVERSAMPLE=${NAT_OVERSAMPLE:-2}
 PER_GROUP=${PER_GROUP:-20}
-GROUPS=${GROUPS:-"G1 G2 G3 G4"}
+# NB: do not name this variable GROUPS -- bash keeps GROUPS as the special
+# gid list (always set, e.g. "0" for root) and silently ignores assignments,
+# so GROUPS="..." never takes effect and "--groups 0" selects no rows.
+SELECT_GROUPS=${SELECT_GROUPS:-"G1 G2 G3 G4"}
 MAX_NEW=${MAX_NEW:-16384}
 MAX_LEN=${MAX_LEN:-34000}
 GPU_UTIL=${GPU_UTIL:-0.85}
@@ -55,6 +58,13 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 [ -x "$PY" ] || die "python not found: $PY"
 [ -f "$FKL_CKPT/config.json" ] || die "missing FKL checkpoint: $FKL_CKPT"
 [ -f "$RKL_CKPT/config.json" ] || die "missing RKL checkpoint: $RKL_CKPT"
+[ -n "$SELECT_GROUPS" ] || die "SELECT_GROUPS is empty"
+for _g in $SELECT_GROUPS; do
+  case "$_g" in
+    G1|G2|G3|G4|G5) ;;
+    *) die "bad group '$_g' in SELECT_GROUPS (expected G1..G5)" ;;
+  esac
+done
 
 say "============================================================"
 say " P0/P1 teacher-prefix counterfactual"
@@ -102,7 +112,7 @@ run_branches() {
                "fixedrkl=$CAND_DIR/arm_top1_fixedrkl.npz" \
     --pair fixed --model-path "$model" --tokenizer-path "$TOKENIZER_PATH" \
     --tag "$tag" --out-dir "$out" \
-    --groups $GROUPS --per-group "$PER_GROUP" --samples "$SAMPLES" \
+    --groups $SELECT_GROUPS --per-group "$PER_GROUP" --samples "$SAMPLES" \
     --natural-oversample "$NAT_OVERSAMPLE" \
     --max-new-tokens "$MAX_NEW" --max-model-len "$MAX_LEN" \
     --temperature 1.0 --top-p 1.0 --top-k -1 \
